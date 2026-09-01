@@ -27,8 +27,7 @@ jobs:
           version: latest
 
       - name: Configure
-        run: emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
+       run: emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPLATFORM=Web
       - name: Build
         run: cmake --build build --config Release -j2
 
