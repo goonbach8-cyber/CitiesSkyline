@@ -512,92 +512,158 @@ void City::PlaceRoadLine(int x0, int z0, int x1, int z1) {
 }
 
 std::vector<Vector3> City::BuildDraggedRoadCurve() const {
-    std::vector<Vector3> controls = roadDragWorld_;
+    std::vector<Vector3> gesture = roadDragWorld_;
 
     if (roadDragCurrentValid_) {
-        if (controls.empty()) {
-            controls.push_back(roadDragCurrent_);
+        if (gesture.empty()) {
+            gesture.push_back(roadDragCurrent_);
         } else {
-            Vector3 last = controls.back();
+            Vector3 last = gesture.back();
             float dx = roadDragCurrent_.x - last.x;
             float dz = roadDragCurrent_.z - last.z;
-            if (dx * dx + dz * dz > 0.04f) controls.push_back(roadDragCurrent_);
+            if (dx * dx + dz * dz > 0.01f) {
+                gesture.push_back(roadDragCurrent_);
+            }
         }
     }
 
-    if (controls.size() < 2) return controls;
+    if (gesture.size() < 2) return gesture;
 
-    // Simplify tiny mouse jitter before smoothing.
-    std::vector<Vector3> simplified;
-    simplified.reserve(controls.size());
-    simplified.push_back(controls.front());
-    for (size_t i = 1; i + 1 < controls.size(); ++i) {
-        Vector3 last = simplified.back();
-        float dx = controls[i].x - last.x;
-        float dz = controls[i].z - last.z;
-        if (dx * dx + dz * dz >= (CELL_SIZE * 0.30f) * (CELL_SIZE * 0.30f)) {
-            simplified.push_back(controls[i]);
+    Vector3 start = gesture.front();
+    Vector3 end = gesture.back();
+
+    // Snap the end onto nearby existing road nodes. This makes T-junctions and
+    // continuations visually meet instead of ending a few pixels beside them.
+    float bestSnapSq = (CELL_SIZE * 0.72f) * (CELL_SIZE * 0.72f);
+    Vector3 snappedEnd = end;
+    bool snapped = false;
+
+    int egx = (int)floorf(end.x / CELL_SIZE + GRID_W / 2.0f);
+    int egz = (int)floorf(end.z / CELL_SIZE + GRID_H / 2.0f);
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            int x = egx + dx;
+            int z = egz + dz;
+            if (!RoadAt(x, z)) continue;
+
+            Vector3 candidate = GridToWorld(x, z);
+            float sx = candidate.x - end.x;
+            float sz = candidate.z - end.z;
+            float d2 = sx * sx + sz * sz;
+            if (d2 < bestSnapSq) {
+                bestSnapSq = d2;
+                snappedEnd = candidate;
+                snapped = true;
+            }
         }
     }
-    simplified.push_back(controls.back());
+    if (snapped) end = snappedEnd;
 
-    // Chaikin corner cutting: two passes turn the hand-drawn polyline into a
-    // smooth road centreline while still following the player's mouse gesture.
-    std::vector<Vector3> curve = simplified;
-    for (int pass = 0; pass < 2 && curve.size() >= 2; ++pass) {
-        std::vector<Vector3> next;
-        next.reserve(curve.size() * 2);
-        next.push_back(curve.front());
+    start.y = TerrainHeightAtWorld(start.x, start.z);
+    end.y = TerrainHeightAtWorld(end.x, end.z);
 
-        for (size_t i = 0; i + 1 < curve.size(); ++i) {
-            const Vector3& a = curve[i];
-            const Vector3& b = curve[i + 1];
+    float chordX = end.x - start.x;
+    float chordZ = end.z - start.z;
+    float chordLength = sqrtf(chordX * chordX + chordZ * chordZ);
 
-            Vector3 q{
-                a.x * 0.75f + b.x * 0.25f,
-                0.0f,
-                a.z * 0.75f + b.z * 0.25f
-            };
-            Vector3 r{
-                a.x * 0.25f + b.x * 0.75f,
-                0.0f,
-                a.z * 0.25f + b.z * 0.75f
-            };
-            q.y = TerrainHeightAtWorld(q.x, q.z);
-            r.y = TerrainHeightAtWorld(r.x, r.z);
-            next.push_back(q);
-            next.push_back(r);
-        }
-
-        next.push_back(curve.back());
-        curve.swap(next);
+    if (chordLength < CELL_SIZE * 0.55f) {
+        return {start, end};
     }
 
-    // Resample so preview and placement have consistent spacing.
-    std::vector<Vector3> sampled;
-    sampled.push_back(curve.front());
+    float ux = chordX / chordLength;
+    float uz = chordZ / chordLength;
+    float nx = -uz;
+    float nz = ux;
 
-    for (size_t i = 0; i + 1 < curve.size(); ++i) {
-        Vector3 a = curve[i];
-        Vector3 b = curve[i + 1];
-        float dx = b.x - a.x;
-        float dz = b.z - a.z;
-        float len = sqrtf(dx * dx + dz * dz);
-        int steps = std::max(1, (int)ceilf(len / (CELL_SIZE * 0.22f)));
+    // Measure the strongest intentional sideways movement. A centre weighting
+    // suppresses little wobbles close to the start/end of the drag.
+    float strongest = 0.0f;
+    for (size_t i = 1; i + 1 < gesture.size(); ++i) {
+        const Vector3& p = gesture[i];
+        float vx = p.x - start.x;
+        float vz = p.z - start.z;
 
-        for (int s = 1; s <= steps; ++s) {
-            float t = (float)s / steps;
+        float along = (vx * ux + vz * uz) / chordLength;
+        if (along <= 0.05f || along >= 0.95f) continue;
+
+        float signedSide = vx * nx + vz * nz;
+        float centreWeight = sinf(PI * Clamp(along, 0.0f, 1.0f));
+        float candidate = signedSide * centreWeight;
+
+        if (fabsf(candidate) > fabsf(strongest)) strongest = candidate;
+    }
+
+    // Small mouse jitter should create a straight road, not a tiny accidental curve.
+    if (fabsf(strongest) < CELL_SIZE * 0.22f) {
+        int steps = std::max(2, (int)ceilf(chordLength / (CELL_SIZE * 0.22f)));
+        std::vector<Vector3> straight;
+        straight.reserve((size_t)steps + 1);
+        for (int i = 0; i <= steps; ++i) {
+            float t = (float)i / steps;
             Vector3 p{
-                a.x + dx * t,
+                start.x + chordX * t,
                 0.0f,
-                a.z + dz * t
+                start.z + chordZ * t
             };
             p.y = TerrainHeightAtWorld(p.x, p.z);
-            sampled.push_back(p);
+            straight.push_back(p);
+        }
+        return straight;
+    }
+
+    float sign = strongest >= 0.0f ? 1.0f : -1.0f;
+    float desiredSagitta = fabsf(strongest);
+
+    // Enforce a minimum bend radius. This is the important part that makes a
+    // curve feel like a road-tool arc rather than a hand-drawn noodle.
+    const float minimumRadius = CELL_SIZE * 2.55f;
+    float maxSagittaForRadius = chordLength * 0.38f;
+
+    if (chordLength < minimumRadius * 2.0f) {
+        float inside = minimumRadius * minimumRadius - (chordLength * chordLength * 0.25f);
+        if (inside > 0.0f) {
+            float radiusLimited = minimumRadius - sqrtf(inside);
+            maxSagittaForRadius = std::min(maxSagittaForRadius, radiusLimited);
         }
     }
 
-    return sampled;
+    float sagitta = std::min(desiredSagitta, maxSagittaForRadius);
+    sagitta = std::max(sagitta, CELL_SIZE * 0.16f);
+
+    // Circular arc from chord + sagitta:
+    // R = L²/(8h) + h/2 and the centre lies R-h behind the chord midpoint.
+    float radius = chordLength * chordLength / (8.0f * sagitta) + sagitta * 0.5f;
+    float centreDistance = radius - sagitta;
+
+    Vector3 mid{
+        (start.x + end.x) * 0.5f,
+        0.0f,
+        (start.z + end.z) * 0.5f
+    };
+
+    int steps = std::max(10, (int)ceilf(chordLength / (CELL_SIZE * 0.16f)));
+    std::vector<Vector3> arc;
+    arc.reserve((size_t)steps + 1);
+
+    for (int i = 0; i <= steps; ++i) {
+        float t = (float)i / steps;
+        float x = (t - 0.5f) * chordLength;
+        float underRoot = std::max(0.0f, radius * radius - x * x);
+        float offset = sign * (sqrtf(underRoot) - centreDistance);
+
+        Vector3 p{
+            mid.x + ux * x + nx * offset,
+            0.0f,
+            mid.z + uz * x + nz * offset
+        };
+        p.y = TerrainHeightAtWorld(p.x, p.z);
+        arc.push_back(p);
+    }
+
+    // Keep the exact snapped endpoints.
+    arc.front() = start;
+    arc.back() = end;
+    return arc;
 }
 
 bool City::RoadCurvePointValid(const Vector3& p) const {
@@ -1437,11 +1503,9 @@ void City::DrawRoads(const Camera3D& camera) const {
 
             if (i > 0 && i + 1 < points.size()) {
                 Vector3 nNext{-nextDir.z, 0.0f, nextDir.x};
-                float denom = normal.x * nNext.x + normal.z * nNext.z;
-                if (fabsf(denom) > 0.18f) {
-                    width = halfWidth / denom;
-                }
-                width = Clamp(width, -halfWidth * 1.55f, halfWidth * 1.55f);
+                float denom = fabsf(normal.x * nNext.x + normal.z * nNext.z);
+                denom = std::max(0.55f, denom);
+                width = std::min(halfWidth / denom, halfWidth * 1.35f);
             }
 
             p.y += lift;
@@ -1646,9 +1710,9 @@ void City::DrawRoadPreview() const {
 
             if (i > 0 && i + 1 < curve.size()) {
                 Vector3 nNext{-nextDir.z, 0.0f, nextDir.x};
-                float denom = normal.x * nNext.x + normal.z * nNext.z;
-                if (fabsf(denom) > 0.18f) width = halfWidth / denom;
-                width = Clamp(width, -halfWidth * 1.55f, halfWidth * 1.55f);
+                float denom = fabsf(normal.x * nNext.x + normal.z * nNext.z);
+                denom = std::max(0.55f, denom);
+                width = std::min(halfWidth / denom, halfWidth * 1.35f);
             }
 
             p.y += lift;
@@ -1725,7 +1789,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.12", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.13", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});
