@@ -50,16 +50,26 @@ City::City() {
 
     // Small starter road so the player immediately has a visible anchor.
     int previousX = -1;
+    RoadVisualPath starterVisual;
     for (int x = 38; x <= 53; ++x) {
         if (!IsWater(x, 48)) {
             roads_[48][x] = true;
             ++roadCount_;
             if (previousX >= 0) LinkRoadCells(previousX, 48, x, 48);
             previousX = x;
+
+            Vector3 p = GridToWorld(x, 48);
+            p.y = TerrainHeightAtWorld(p.x, p.z);
+            starterVisual.points.push_back(p);
         } else {
+            if (starterVisual.points.size() >= 2) {
+                roadVisualPaths_.push_back(starterVisual);
+            }
+            starterVisual.points.clear();
             previousX = -1;
         }
     }
+    if (starterVisual.points.size() >= 2) roadVisualPaths_.push_back(starterVisual);
     RecalculateBudgetPreview();
 }
 
@@ -605,6 +615,8 @@ void City::PlaceDraggedRoad() {
     int prevX = -1;
     int prevZ = -1;
     bool havePrev = false;
+    RoadVisualPath visual;
+    visual.points.reserve(curve.size());
 
     auto addCell = [&](int x, int z) -> bool {
         if (!Inside(x, z) || IsWater(x, z)) return false;
@@ -626,6 +638,7 @@ void City::PlaceDraggedRoad() {
             while (abs(dx) > 1 || abs(dz) > 1) {
                 int sx = prevX + (dx > 0 ? 1 : (dx < 0 ? -1 : 0));
                 int sz = prevZ + (dz > 0 ? 1 : (dz < 0 ? -1 : 0));
+
                 if (!Inside(sx, sz) || IsWater(sx, sz)) return false;
                 if (BuildingIndexAt(sx, sz) >= 0 || ServiceIndexAt(sx, sz) >= 0) return false;
 
@@ -654,12 +667,27 @@ void City::PlaceDraggedRoad() {
         return true;
     };
 
-    for (const auto& p : curve) {
+    for (const auto& raw : curve) {
+        Vector3 p = raw;
+        p.y = TerrainHeightAtWorld(p.x, p.z);
+
         int x = (int)floorf(p.x / CELL_SIZE + GRID_W / 2.0f);
         int z = (int)floorf(p.z / CELL_SIZE + GRID_H / 2.0f);
 
-        if (havePrev && x == prevX && z == prevZ) continue;
-        if (!addCell(x, z)) break;
+        if (!Inside(x, z) || IsWater(x, z)) break;
+        if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) break;
+
+        if (!havePrev || x != prevX || z != prevZ) {
+            if (!addCell(x, z)) break;
+        }
+
+        visual.points.push_back(p);
+    }
+
+    // Keep the original smoothed mouse gesture for rendering. The old graph
+    // remains underneath for zoning, services and traffic.
+    if (visual.points.size() >= 2) {
+        roadVisualPaths_.push_back(std::move(visual));
     }
 
     vehicles_.clear();
@@ -1366,108 +1394,122 @@ void City::DrawRoadTile(int x, int z, bool detailed) const {
 
 void City::DrawRoads(const Camera3D& camera) const {
     float cameraDistance = Vector3Distance(camera.position, camera.target);
-    float visibleRadius = cameraDistance * 1.90f + 38.0f;
+    float visibleRadius = cameraDistance * 1.95f + 40.0f;
     float visibleSq = visibleRadius * visibleRadius;
 
-    auto strip = [](Vector3 a, Vector3 b, float halfWidth, float lift, Color col) {
-        Vector3 d{b.x-a.x, 0.0f, b.z-a.z};
-        float len=sqrtf(d.x*d.x+d.z*d.z);
-        if(len<0.001f) return;
-        d.x/=len; d.z/=len;
-        Vector3 side{-d.z*halfWidth,0.0f,d.x*halfWidth};
-        a.y+=lift; b.y+=lift;
+    auto buildRibbon = [&](const std::vector<Vector3>& points, float halfWidth, float lift, Color col) {
+        if (points.size() < 2) return;
 
-        Vector3 aL{a.x+side.x,a.y,a.z+side.z};
-        Vector3 aR{a.x-side.x,a.y,a.z-side.z};
-        Vector3 bL{b.x+side.x,b.y,b.z+side.z};
-        Vector3 bR{b.x-side.x,b.y,b.z-side.z};
+        std::vector<Vector3> left(points.size());
+        std::vector<Vector3> right(points.size());
 
-        DrawTriangle3D(aL,bL,bR,col);
-        DrawTriangle3D(aL,bR,aR,col);
+        for (size_t i = 0; i < points.size(); ++i) {
+            Vector3 p = points[i];
+
+            Vector3 prevDir{};
+            Vector3 nextDir{};
+
+            if (i > 0) {
+                prevDir = Vector3Subtract(points[i], points[i - 1]);
+                prevDir.y = 0.0f;
+                float l = sqrtf(prevDir.x * prevDir.x + prevDir.z * prevDir.z);
+                if (l > 0.0001f) { prevDir.x /= l; prevDir.z /= l; }
+            }
+            if (i + 1 < points.size()) {
+                nextDir = Vector3Subtract(points[i + 1], points[i]);
+                nextDir.y = 0.0f;
+                float l = sqrtf(nextDir.x * nextDir.x + nextDir.z * nextDir.z);
+                if (l > 0.0001f) { nextDir.x /= l; nextDir.z /= l; }
+            }
+
+            Vector3 dir{};
+            if (i == 0) dir = nextDir;
+            else if (i + 1 == points.size()) dir = prevDir;
+            else {
+                dir = Vector3Add(prevDir, nextDir);
+                float l = sqrtf(dir.x * dir.x + dir.z * dir.z);
+                if (l < 0.001f) dir = nextDir;
+                else { dir.x /= l; dir.z /= l; }
+            }
+
+            Vector3 normal{-dir.z, 0.0f, dir.x};
+            float width = halfWidth;
+
+            if (i > 0 && i + 1 < points.size()) {
+                Vector3 nNext{-nextDir.z, 0.0f, nextDir.x};
+                float denom = normal.x * nNext.x + normal.z * nNext.z;
+                if (fabsf(denom) > 0.18f) {
+                    width = halfWidth / denom;
+                }
+                width = Clamp(width, -halfWidth * 1.55f, halfWidth * 1.55f);
+            }
+
+            p.y += lift;
+            left[i] = {p.x + normal.x * width, p.y, p.z + normal.z * width};
+            right[i] = {p.x - normal.x * width, p.y, p.z - normal.z * width};
+        }
+
+        for (size_t i = 0; i + 1 < points.size(); ++i) {
+            Vector3 mid{
+                (points[i].x + points[i + 1].x) * 0.5f,
+                0.0f,
+                (points[i].z + points[i + 1].z) * 0.5f
+            };
+
+            int gx = (int)floorf(mid.x / CELL_SIZE + GRID_W / 2.0f);
+            int gz = (int)floorf(mid.z / CELL_SIZE + GRID_H / 2.0f);
+            if (!RoadAt(gx, gz)) continue;
+
+            DrawTriangle3D(left[i], left[i + 1], right[i + 1], col);
+            DrawTriangle3D(left[i], right[i + 1], right[i], col);
+        }
     };
 
-    const float sidewalkHalf=CELL_SIZE*0.385f;
-    const float asphaltHalf=CELL_SIZE*0.300f;
-    Color sidewalk{171,173,169,255};
-    Color asphalt{47,52,56,255};
-    Color lane{225,219,186,190};
+    auto drawCenterDashes = [&](const std::vector<Vector3>& points) {
+        if (points.size() < 2) return;
+        float accumulated = 0.0f;
 
-    // Full edge strips overlap at their endpoints. This guarantees there are
-    // no triangular holes between neighbouring road sections.
-    for(int z=0;z<GRID_H;++z){
-        for(int x=0;x<GRID_W;++x){
-            if(!RoadAt(x,z)) continue;
+        for (size_t i = 0; i + 1 < points.size(); ++i) {
+            Vector3 a = points[i];
+            Vector3 b = points[i + 1];
+            Vector3 d = Vector3Subtract(b, a);
+            d.y = 0.0f;
+            float len = sqrtf(d.x * d.x + d.z * d.z);
+            if (len < 0.001f) continue;
 
-            Vector3 p=GridToWorld(x,z);
-            float cx=p.x-camera.target.x, cz=p.z-camera.target.z;
-            if(cx*cx+cz*cz>visibleSq) continue;
+            bool dash = ((int)floorf(accumulated / 1.35f) % 2) == 0;
+            accumulated += len;
+            if (!dash) continue;
 
-            unsigned char links=roadLinks_[z][x];
-            for(int dir=0;dir<8;++dir){
-                if((links&(1u<<dir))==0) continue;
+            d.x /= len; d.z /= len;
+            Vector3 side{-d.z * 0.014f, 0.0f, d.x * 0.014f};
 
-                int nx=x+ROAD_DIRS[dir][0];
-                int nz=z+ROAD_DIRS[dir][1];
-                if(!Inside(nx,nz)) continue;
-                if(nz<z || (nz==z && nx<x)) continue;
+            a.y += 0.154f;
+            b.y += 0.154f;
+            Vector3 aL{a.x + side.x, a.y, a.z + side.z};
+            Vector3 aR{a.x - side.x, a.y, a.z - side.z};
+            Vector3 bL{b.x + side.x, b.y, b.z + side.z};
+            Vector3 bR{b.x - side.x, b.y, b.z - side.z};
 
-                Vector3 q=GridToWorld(nx,nz);
-                Vector3 d{q.x-p.x,0.0f,q.z-p.z};
-                float len=sqrtf(d.x*d.x+d.z*d.z);
-                if(len<0.001f) continue;
-                d.x/=len; d.z/=len;
-
-                Vector3 a{p.x-d.x*0.12f,p.y,p.z-d.z*0.12f};
-                Vector3 b{q.x+d.x*0.12f,q.y,q.z+d.z*0.12f};
-
-                strip(a,b,sidewalkHalf,0.050f,sidewalk);
-                strip(a,b,asphaltHalf,0.103f,asphalt);
-
-                Vector3 l0{
-                    p.x+(q.x-p.x)*0.40f,
-                    p.y+(q.y-p.y)*0.40f,
-                    p.z+(q.z-p.z)*0.40f
-                };
-                Vector3 l1{
-                    p.x+(q.x-p.x)*0.60f,
-                    p.y+(q.y-p.y)*0.60f,
-                    p.z+(q.z-p.z)*0.60f
-                };
-                strip(l0,l1,0.014f,0.153f,lane);
-            }
+            DrawTriangle3D(aL, bL, bR, Color{226, 220, 190, 190});
+            DrawTriangle3D(aL, bR, aR, Color{226, 220, 190, 190});
         }
-    }
+    };
 
-    // Only bends, endpoints and real junctions receive a filled join.
-    // Straight degree-2 nodes remain invisible.
-    for(int z=0;z<GRID_H;++z){
-        for(int x=0;x<GRID_W;++x){
-            if(!RoadAt(x,z)) continue;
+    Color sidewalk{171, 173, 169, 255};
+    Color asphalt{47, 52, 56, 255};
 
-            unsigned char links=roadLinks_[z][x];
-            int degree=0;
-            int first=-1,second=-1;
+    for (const auto& path : roadVisualPaths_) {
+        if (path.points.size() < 2) continue;
 
-            for(int dir=0;dir<8;++dir){
-                if((links&(1u<<dir))==0) continue;
-                if(degree==0) first=dir;
-                else if(degree==1) second=dir;
-                ++degree;
-            }
+        Vector3 center = path.points[path.points.size() / 2];
+        float dx = center.x - camera.target.x;
+        float dz = center.z - camera.target.z;
+        if (dx * dx + dz * dz > visibleSq) continue;
 
-            bool straight=(degree==2 && first>=0 && second>=0 &&
-                           OppositeRoadDir(first)==second);
-            if(straight || degree==0) continue;
-
-            Vector3 p=GridToWorld(x,z);
-            float sRadius=sidewalkHalf*(degree>=3?1.05f:1.00f);
-            float aRadius=asphaltHalf*(degree>=3?1.09f:1.02f);
-
-            DrawCylinder({p.x,p.y+0.052f,p.z},
-                         sRadius,sRadius,0.070f,36,sidewalk);
-            DrawCylinder({p.x,p.y+0.105f,p.z},
-                         aRadius,aRadius,0.084f,36,asphalt);
-        }
+        buildRibbon(path.points, CELL_SIZE * 0.385f, 0.050f, sidewalk);
+        buildRibbon(path.points, CELL_SIZE * 0.300f, 0.103f, asphalt);
+        drawCenterDashes(path.points);
     }
 }
 
@@ -1555,56 +1597,76 @@ void City::DrawTraffic(const Camera3D& camera) const {
 }
 
 void City::DrawRoadPreview() const {
-    if(tool_!=Tool::Road || !dragging_) return;
+    if (tool_ != Tool::Road || !dragging_) return;
 
-    std::vector<Vector3> curve=BuildDraggedRoadCurve();
-    if(curve.size()<2) return;
+    std::vector<Vector3> curve = BuildDraggedRoadCurve();
+    if (curve.size() < 2) return;
 
-    auto strip=[](Vector3 a,Vector3 b,float halfWidth,float lift,Color col){
-        Vector3 d{b.x-a.x,0.0f,b.z-a.z};
-        float len=sqrtf(d.x*d.x+d.z*d.z);
-        if(len<0.001f) return;
-        d.x/=len; d.z/=len;
-        Vector3 side{-d.z*halfWidth,0.0f,d.x*halfWidth};
-        a.y+=lift; b.y+=lift;
-        Vector3 aL{a.x+side.x,a.y,a.z+side.z};
-        Vector3 aR{a.x-side.x,a.y,a.z-side.z};
-        Vector3 bL{b.x+side.x,b.y,b.z+side.z};
-        Vector3 bR{b.x-side.x,b.y,b.z-side.z};
-        DrawTriangle3D(aL,bL,bR,col);
-        DrawTriangle3D(aL,bR,aR,col);
+    bool valid = true;
+    for (const auto& p : curve) {
+        if (!RoadCurvePointValid(p)) {
+            valid = false;
+            break;
+        }
+    }
+
+    auto ribbon = [&](float halfWidth, float lift, Color col) {
+        std::vector<Vector3> left(curve.size());
+        std::vector<Vector3> right(curve.size());
+
+        for (size_t i = 0; i < curve.size(); ++i) {
+            Vector3 p = curve[i];
+            Vector3 prevDir{}, nextDir{};
+
+            if (i > 0) {
+                prevDir = Vector3Subtract(curve[i], curve[i - 1]);
+                prevDir.y = 0.0f;
+                float l = sqrtf(prevDir.x * prevDir.x + prevDir.z * prevDir.z);
+                if (l > 0.0001f) { prevDir.x /= l; prevDir.z /= l; }
+            }
+            if (i + 1 < curve.size()) {
+                nextDir = Vector3Subtract(curve[i + 1], curve[i]);
+                nextDir.y = 0.0f;
+                float l = sqrtf(nextDir.x * nextDir.x + nextDir.z * nextDir.z);
+                if (l > 0.0001f) { nextDir.x /= l; nextDir.z /= l; }
+            }
+
+            Vector3 dir{};
+            if (i == 0) dir = nextDir;
+            else if (i + 1 == curve.size()) dir = prevDir;
+            else {
+                dir = Vector3Add(prevDir, nextDir);
+                float l = sqrtf(dir.x * dir.x + dir.z * dir.z);
+                if (l < 0.001f) dir = nextDir;
+                else { dir.x /= l; dir.z /= l; }
+            }
+
+            Vector3 normal{-dir.z, 0.0f, dir.x};
+            float width = halfWidth;
+
+            if (i > 0 && i + 1 < curve.size()) {
+                Vector3 nNext{-nextDir.z, 0.0f, nextDir.x};
+                float denom = normal.x * nNext.x + normal.z * nNext.z;
+                if (fabsf(denom) > 0.18f) width = halfWidth / denom;
+                width = Clamp(width, -halfWidth * 1.55f, halfWidth * 1.55f);
+            }
+
+            p.y += lift;
+            left[i] = {p.x + normal.x * width, p.y, p.z + normal.z * width};
+            right[i] = {p.x - normal.x * width, p.y, p.z - normal.z * width};
+        }
+
+        for (size_t i = 0; i + 1 < curve.size(); ++i) {
+            DrawTriangle3D(left[i], left[i + 1], right[i + 1], col);
+            DrawTriangle3D(left[i], right[i + 1], right[i], col);
+        }
     };
 
-    bool valid=true;
-    for(const auto& p:curve){
-        if(!RoadCurvePointValid(p)){valid=false;break;}
-    }
+    Color outer = valid ? Color{91, 192, 214, 120} : Color{229, 91, 77, 130};
+    Color inner = valid ? Color{62, 137, 158, 180} : Color{176, 55, 48, 188};
 
-    Color outer=valid?Color{93,195,215,122}:Color{229,91,77,132};
-    Color inner=valid?Color{60,137,156,176}:Color{176,55,48,184};
-    float outerHalf=CELL_SIZE*0.385f;
-    float innerHalf=CELL_SIZE*0.295f;
-
-    for(size_t i=0;i+1<curve.size();++i){
-        strip(curve[i],curve[i+1],outerHalf,0.116f,outer);
-        strip(curve[i],curve[i+1],innerHalf,0.128f,inner);
-    }
-
-    // Fill the joins in the live preview as well.
-    for(size_t i=0;i<curve.size();i+=2){
-        const Vector3& p=curve[i];
-        DrawCylinder({p.x,p.y+0.118f,p.z},
-                     outerHalf,outerHalf,0.018f,24,outer);
-        DrawCylinder({p.x,p.y+0.130f,p.z},
-                     innerHalf,innerHalf,0.020f,24,inner);
-    }
-
-    const Vector3& start=curve.front();
-    const Vector3& end=curve.back();
-    DrawCylinder({start.x,start.y+0.16f,start.z},0.15f,0.15f,0.045f,20,
-                 Color{222,245,249,225});
-    DrawCylinder({end.x,end.y+0.16f,end.z},0.15f,0.15f,0.045f,20,
-                 valid?Color{222,245,249,225}:Color{247,132,117,230});
+    ribbon(CELL_SIZE * 0.385f, 0.116f, outer);
+    ribbon(CELL_SIZE * 0.295f, 0.128f, inner);
 }
 
 void City::DrawPlacementPreview() const {
@@ -1663,7 +1725,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.11", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.12", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});

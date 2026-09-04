@@ -52,6 +52,10 @@ private:
         int seed = 0;
     };
 
+    struct RoadVisualPath {
+        std::vector<Vector3> points;
+    };
+
     struct Vehicle {
         int x = 0;
         int z = 0;
@@ -156,6 +160,7 @@ private:
     std::vector<Building> buildings_;
     std::vector<ServiceStructure> services_;
     std::vector<NaturalProp> naturalProps_;
+    std::vector<RoadVisualPath> roadVisualPaths_;
     std::vector<Vehicle> vehicles_;
 
     Model landModel_{};
