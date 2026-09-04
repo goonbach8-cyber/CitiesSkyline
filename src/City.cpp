@@ -521,43 +521,60 @@ std::vector<Vector3> City::BuildDraggedRoadCurve() const {
             Vector3 last = gesture.back();
             float dx = roadDragCurrent_.x - last.x;
             float dz = roadDragCurrent_.z - last.z;
-            if (dx * dx + dz * dz > 0.01f) {
-                gesture.push_back(roadDragCurrent_);
-            }
+            if (dx * dx + dz * dz > 0.01f) gesture.push_back(roadDragCurrent_);
         }
     }
 
     if (gesture.size() < 2) return gesture;
 
+    auto snapToVisibleRoad = [&](Vector3 input, float radius, Vector3& output) {
+        float bestSq = radius * radius;
+        bool found = false;
+
+        for (const auto& path : roadVisualPaths_) {
+            if (path.points.size() < 2) continue;
+
+            for (size_t i = 0; i + 1 < path.points.size(); ++i) {
+                const Vector3& a = path.points[i];
+                const Vector3& b = path.points[i + 1];
+
+                float abx = b.x - a.x;
+                float abz = b.z - a.z;
+                float lenSq = abx * abx + abz * abz;
+                if (lenSq < 0.00001f) continue;
+
+                float apx = input.x - a.x;
+                float apz = input.z - a.z;
+                float t = Clamp((apx * abx + apz * abz) / lenSq, 0.0f, 1.0f);
+
+                Vector3 p{
+                    a.x + abx * t,
+                    0.0f,
+                    a.z + abz * t
+                };
+                p.y = TerrainHeightAtWorld(p.x, p.z);
+
+                float dx = p.x - input.x;
+                float dz = p.z - input.z;
+                float d2 = dx * dx + dz * dz;
+
+                if (d2 < bestSq) {
+                    bestSq = d2;
+                    output = p;
+                    found = true;
+                }
+            }
+        }
+        return found;
+    };
+
     Vector3 start = gesture.front();
     Vector3 end = gesture.back();
 
-    // Snap the end onto nearby existing road nodes. This makes T-junctions and
-    // continuations visually meet instead of ending a few pixels beside them.
-    float bestSnapSq = (CELL_SIZE * 0.72f) * (CELL_SIZE * 0.72f);
-    Vector3 snappedEnd = end;
-    bool snapped = false;
-
-    int egx = (int)floorf(end.x / CELL_SIZE + GRID_W / 2.0f);
-    int egz = (int)floorf(end.z / CELL_SIZE + GRID_H / 2.0f);
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            int x = egx + dx;
-            int z = egz + dz;
-            if (!RoadAt(x, z)) continue;
-
-            Vector3 candidate = GridToWorld(x, z);
-            float sx = candidate.x - end.x;
-            float sz = candidate.z - end.z;
-            float d2 = sx * sx + sz * sz;
-            if (d2 < bestSnapSq) {
-                bestSnapSq = d2;
-                snappedEnd = candidate;
-                snapped = true;
-            }
-        }
-    }
-    if (snapped) end = snappedEnd;
+    // Snap to the visible centreline, not just the hidden simulation grid.
+    Vector3 snapped{};
+    if (snapToVisibleRoad(start, CELL_SIZE * 0.78f, snapped)) start = snapped;
+    if (snapToVisibleRoad(end, CELL_SIZE * 0.88f, snapped)) end = snapped;
 
     start.y = TerrainHeightAtWorld(start.x, start.z);
     end.y = TerrainHeightAtWorld(end.x, end.z);
@@ -566,17 +583,13 @@ std::vector<Vector3> City::BuildDraggedRoadCurve() const {
     float chordZ = end.z - start.z;
     float chordLength = sqrtf(chordX * chordX + chordZ * chordZ);
 
-    if (chordLength < CELL_SIZE * 0.55f) {
-        return {start, end};
-    }
+    if (chordLength < CELL_SIZE * 0.55f) return {start, end};
 
     float ux = chordX / chordLength;
     float uz = chordZ / chordLength;
     float nx = -uz;
     float nz = ux;
 
-    // Measure the strongest intentional sideways movement. A centre weighting
-    // suppresses little wobbles close to the start/end of the drag.
     float strongest = 0.0f;
     for (size_t i = 1; i + 1 < gesture.size(); ++i) {
         const Vector3& p = gesture[i];
@@ -593,11 +606,11 @@ std::vector<Vector3> City::BuildDraggedRoadCurve() const {
         if (fabsf(candidate) > fabsf(strongest)) strongest = candidate;
     }
 
-    // Small mouse jitter should create a straight road, not a tiny accidental curve.
     if (fabsf(strongest) < CELL_SIZE * 0.22f) {
-        int steps = std::max(2, (int)ceilf(chordLength / (CELL_SIZE * 0.22f)));
+        int steps = std::max(2, (int)ceilf(chordLength / (CELL_SIZE * 0.18f)));
         std::vector<Vector3> straight;
         straight.reserve((size_t)steps + 1);
+
         for (int i = 0; i <= steps; ++i) {
             float t = (float)i / steps;
             Vector3 p{
@@ -614,13 +627,11 @@ std::vector<Vector3> City::BuildDraggedRoadCurve() const {
     float sign = strongest >= 0.0f ? 1.0f : -1.0f;
     float desiredSagitta = fabsf(strongest);
 
-    // Enforce a minimum bend radius. This is the important part that makes a
-    // curve feel like a road-tool arc rather than a hand-drawn noodle.
-    const float minimumRadius = CELL_SIZE * 2.55f;
-    float maxSagittaForRadius = chordLength * 0.38f;
+    const float minimumRadius = CELL_SIZE * 2.75f;
+    float maxSagittaForRadius = chordLength * 0.34f;
 
     if (chordLength < minimumRadius * 2.0f) {
-        float inside = minimumRadius * minimumRadius - (chordLength * chordLength * 0.25f);
+        float inside = minimumRadius * minimumRadius - chordLength * chordLength * 0.25f;
         if (inside > 0.0f) {
             float radiusLimited = minimumRadius - sqrtf(inside);
             maxSagittaForRadius = std::min(maxSagittaForRadius, radiusLimited);
@@ -628,10 +639,8 @@ std::vector<Vector3> City::BuildDraggedRoadCurve() const {
     }
 
     float sagitta = std::min(desiredSagitta, maxSagittaForRadius);
-    sagitta = std::max(sagitta, CELL_SIZE * 0.16f);
+    sagitta = std::max(sagitta, CELL_SIZE * 0.15f);
 
-    // Circular arc from chord + sagitta:
-    // R = L²/(8h) + h/2 and the centre lies R-h behind the chord midpoint.
     float radius = chordLength * chordLength / (8.0f * sagitta) + sagitta * 0.5f;
     float centreDistance = radius - sagitta;
 
@@ -641,7 +650,7 @@ std::vector<Vector3> City::BuildDraggedRoadCurve() const {
         (start.z + end.z) * 0.5f
     };
 
-    int steps = std::max(10, (int)ceilf(chordLength / (CELL_SIZE * 0.16f)));
+    int steps = std::max(12, (int)ceilf(chordLength / (CELL_SIZE * 0.14f)));
     std::vector<Vector3> arc;
     arc.reserve((size_t)steps + 1);
 
@@ -660,7 +669,6 @@ std::vector<Vector3> City::BuildDraggedRoadCurve() const {
         arc.push_back(p);
     }
 
-    // Keep the exact snapped endpoints.
     arc.front() = start;
     arc.back() = end;
     return arc;
@@ -1463,6 +1471,45 @@ void City::DrawRoads(const Camera3D& camera) const {
     float visibleRadius = cameraDistance * 1.95f + 40.0f;
     float visibleSq = visibleRadius * visibleRadius;
 
+    auto endpointIsJunction = [&](const RoadVisualPath& owner, bool atStart, Vector3& junction) {
+        if (owner.points.size() < 2) return false;
+        Vector3 p = atStart ? owner.points.front() : owner.points.back();
+        float thresholdSq = (CELL_SIZE * 0.42f) * (CELL_SIZE * 0.42f);
+
+        for (const auto& other : roadVisualPaths_) {
+            if (&other == &owner || other.points.size() < 2) continue;
+
+            for (size_t i = 0; i + 1 < other.points.size(); ++i) {
+                const Vector3& a = other.points[i];
+                const Vector3& b = other.points[i + 1];
+
+                float abx = b.x - a.x;
+                float abz = b.z - a.z;
+                float lenSq = abx * abx + abz * abz;
+                if (lenSq < 0.00001f) continue;
+
+                float apx = p.x - a.x;
+                float apz = p.z - a.z;
+                float t = Clamp((apx * abx + apz * abz) / lenSq, 0.0f, 1.0f);
+
+                Vector3 q{
+                    a.x + abx * t,
+                    0.0f,
+                    a.z + abz * t
+                };
+                q.y = TerrainHeightAtWorld(q.x, q.z);
+
+                float dx = p.x - q.x;
+                float dz = p.z - q.z;
+                if (dx * dx + dz * dz <= thresholdSq) {
+                    junction = q;
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
     auto buildRibbon = [&](const std::vector<Vector3>& points, float halfWidth, float lift, Color col) {
         if (points.size() < 2) return;
 
@@ -1471,9 +1518,7 @@ void City::DrawRoads(const Camera3D& camera) const {
 
         for (size_t i = 0; i < points.size(); ++i) {
             Vector3 p = points[i];
-
-            Vector3 prevDir{};
-            Vector3 nextDir{};
+            Vector3 prevDir{}, nextDir{};
 
             if (i > 0) {
                 prevDir = Vector3Subtract(points[i], points[i - 1]);
@@ -1504,8 +1549,8 @@ void City::DrawRoads(const Camera3D& camera) const {
             if (i > 0 && i + 1 < points.size()) {
                 Vector3 nNext{-nextDir.z, 0.0f, nextDir.x};
                 float denom = fabsf(normal.x * nNext.x + normal.z * nNext.z);
-                denom = std::max(0.55f, denom);
-                width = std::min(halfWidth / denom, halfWidth * 1.35f);
+                denom = std::max(0.58f, denom);
+                width = std::min(halfWidth / denom, halfWidth * 1.30f);
             }
 
             p.y += lift;
@@ -1514,24 +1559,30 @@ void City::DrawRoads(const Camera3D& camera) const {
         }
 
         for (size_t i = 0; i + 1 < points.size(); ++i) {
-            Vector3 mid{
-                (points[i].x + points[i + 1].x) * 0.5f,
-                0.0f,
-                (points[i].z + points[i + 1].z) * 0.5f
-            };
-
-            int gx = (int)floorf(mid.x / CELL_SIZE + GRID_W / 2.0f);
-            int gz = (int)floorf(mid.z / CELL_SIZE + GRID_H / 2.0f);
-            if (!RoadAt(gx, gz)) continue;
-
             DrawTriangle3D(left[i], left[i + 1], right[i + 1], col);
             DrawTriangle3D(left[i], right[i + 1], right[i], col);
         }
     };
 
-    auto drawCenterDashes = [&](const std::vector<Vector3>& points) {
+    auto drawCenterDashes = [&](const RoadVisualPath& path) {
+        const auto& points = path.points;
         if (points.size() < 2) return;
-        float accumulated = 0.0f;
+
+        Vector3 jStart{}, jEnd{};
+        bool startJunction = endpointIsJunction(path, true, jStart);
+        bool endJunction = endpointIsJunction(path, false, jEnd);
+        float keepClear = CELL_SIZE * 0.55f;
+
+        float totalLength = 0.0f;
+        for (size_t i = 0; i + 1 < points.size(); ++i) {
+            float dx = points[i + 1].x - points[i].x;
+            float dz = points[i + 1].z - points[i].z;
+            totalLength += sqrtf(dx * dx + dz * dz);
+        }
+
+        float travelled = 0.0f;
+        float dashPeriod = 1.45f;
+        float dashLength = 0.72f;
 
         for (size_t i = 0; i + 1 < points.size(); ++i) {
             Vector3 a = points[i];
@@ -1541,9 +1592,16 @@ void City::DrawRoads(const Camera3D& camera) const {
             float len = sqrtf(d.x * d.x + d.z * d.z);
             if (len < 0.001f) continue;
 
-            bool dash = ((int)floorf(accumulated / 1.35f) % 2) == 0;
-            accumulated += len;
-            if (!dash) continue;
+            float segStart = travelled;
+            float segEnd = travelled + len;
+            travelled = segEnd;
+
+            if (startJunction && segEnd < keepClear) continue;
+            if (endJunction && segStart > totalLength - keepClear) continue;
+
+            float phase = fmodf(segStart, dashPeriod);
+            bool on = phase < dashLength;
+            if (!on) continue;
 
             d.x /= len; d.z /= len;
             Vector3 side{-d.z * 0.014f, 0.0f, d.x * 0.014f};
@@ -1555,8 +1613,8 @@ void City::DrawRoads(const Camera3D& camera) const {
             Vector3 bL{b.x + side.x, b.y, b.z + side.z};
             Vector3 bR{b.x - side.x, b.y, b.z - side.z};
 
-            DrawTriangle3D(aL, bL, bR, Color{226, 220, 190, 190});
-            DrawTriangle3D(aL, bR, aR, Color{226, 220, 190, 190});
+            DrawTriangle3D(aL, bL, bR, Color{226, 220, 190, 185});
+            DrawTriangle3D(aL, bR, aR, Color{226, 220, 190, 185});
         }
     };
 
@@ -1573,7 +1631,39 @@ void City::DrawRoads(const Camera3D& camera) const {
 
         buildRibbon(path.points, CELL_SIZE * 0.385f, 0.050f, sidewalk);
         buildRibbon(path.points, CELL_SIZE * 0.300f, 0.103f, asphalt);
-        drawCenterDashes(path.points);
+        drawCenterDashes(path);
+    }
+
+    // Fill only actual path-to-path junctions. These are not curve nodes, so
+    // the old "circle chain" cannot return.
+    std::vector<Vector3> drawnJunctions;
+    for (const auto& path : roadVisualPaths_) {
+        for (int which = 0; which < 2; ++which) {
+            Vector3 junction{};
+            if (!endpointIsJunction(path, which == 0, junction)) continue;
+
+            bool duplicate = false;
+            for (const auto& p : drawnJunctions) {
+                float dx = p.x - junction.x;
+                float dz = p.z - junction.z;
+                if (dx * dx + dz * dz < 0.12f) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            drawnJunctions.push_back(junction);
+
+            junction.y = TerrainHeightAtWorld(junction.x, junction.z);
+            DrawCylinder(
+                {junction.x, junction.y + 0.052f, junction.z},
+                CELL_SIZE * 0.405f, CELL_SIZE * 0.405f, 0.070f, 28, sidewalk
+            );
+            DrawCylinder(
+                {junction.x, junction.y + 0.105f, junction.z},
+                CELL_SIZE * 0.315f, CELL_SIZE * 0.315f, 0.084f, 28, asphalt
+            );
+        }
     }
 }
 
@@ -1789,7 +1879,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.13", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.14", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});
