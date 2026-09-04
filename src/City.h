@@ -73,6 +73,7 @@ private:
     void RecalculateStats();
     void RecalculateDemand();
     void RecalculateBudgetPreview();
+    void CheckMilestones();
 
     void BuildTerrainCache();
     void BuildTerrainModels();
@@ -92,6 +93,7 @@ private:
     void DrawToolPanel() const;
     void DrawDemandPanel() const;
     void DrawInfoPanel() const;
+    void DrawProgressPanel() const;
     void DrawBar(int x, int y, int w, float value, Color color) const;
     const char* ToolLabel(Tool tool) const;
 
@@ -146,4 +148,13 @@ private:
     int residentialTax_ = 9;
     int commercialTax_ = 10;
     int industrialTax_ = 10;
+
+    // Progression turns the sandbox into a goal-driven city-builder loop.
+    int cityLevel_ = 1;
+    int cityScore_ = 50;
+    int maxBuildingLevel_ = 2;
+    int milestoneTarget_ = 100;
+    int lastMilestoneReward_ = 0;
+    int milestoneBannerDays_ = 0;
+    bool financialWarning_ = false;
 };

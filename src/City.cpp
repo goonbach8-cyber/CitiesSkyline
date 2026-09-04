@@ -301,14 +301,13 @@ void City::HandleUIInput() {
 
     const int sw = GetScreenWidth();
     const int sh = GetScreenHeight();
-    const float hudTop = (float)sh - 118.0f;
+    const float hudTop = (float)sh - 136.0f;
 
-    // Speed controls live on the right side of the bottom city-builder HUD.
     Rectangle speedRects[4] = {
-        {(float)sw - 210.0f, hudTop + 9.0f, 42.0f, 30.0f},
-        {(float)sw - 162.0f, hudTop + 9.0f, 42.0f, 30.0f},
-        {(float)sw - 114.0f, hudTop + 9.0f, 42.0f, 30.0f},
-        {(float)sw - 66.0f,  hudTop + 9.0f, 42.0f, 30.0f}
+        {(float)sw - 206.0f, hudTop + 10.0f, 40.0f, 32.0f},
+        {(float)sw - 160.0f, hudTop + 10.0f, 40.0f, 32.0f},
+        {(float)sw - 114.0f, hudTop + 10.0f, 40.0f, 32.0f},
+        {(float)sw - 68.0f,  hudTop + 10.0f, 40.0f, 32.0f}
     };
     for (int i = 0; i < 4; ++i) {
         if (CheckCollisionPointRec(m, speedRects[i])) {
@@ -317,15 +316,15 @@ void City::HandleUIInput() {
         }
     }
 
-    const float gap = 6.0f;
-    float toolW = ((float)sw - 36.0f - gap * 7.0f) / 8.0f;
-    toolW = Clamp(toolW, 92.0f, 150.0f);
+    const float gap = 7.0f;
+    float toolW = ((float)sw - 32.0f - gap * 7.0f) / 8.0f;
+    toolW = Clamp(toolW, 88.0f, 145.0f);
     float totalW = toolW * 8.0f + gap * 7.0f;
     float startX = ((float)sw - totalW) * 0.5f;
-    float buttonY = hudTop + 53.0f;
+    float buttonY = hudTop + 70.0f;
 
     for (int i = 0; i < 8; ++i) {
-        Rectangle r{startX + i * (toolW + gap), buttonY, toolW, 52.0f};
+        Rectangle r{startX + i * (toolW + gap), buttonY, toolW, 54.0f};
         if (CheckCollisionPointRec(m, r)) {
             SetTool((Tool)i);
             return;
@@ -355,8 +354,8 @@ void City::HandleInput(const Camera3D& camera) {
     }
 
     Vector2 m = GetMousePosition();
-    const float hudTop = (float)GetScreenHeight() - 118.0f;
-    if (m.y < 44.0f || m.y > hudTop) return;
+    const float hudTop = (float)GetScreenHeight() - 136.0f;
+    if (m.y < 42.0f || m.y > hudTop) return;
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hoverX_ >= 0) {
         if (tool_ == Tool::Bulldoze) {
@@ -490,6 +489,7 @@ void City::Simulate(float dt) {
 }
 
 void City::DailyTick() {
+    if (milestoneBannerDays_ > 0) --milestoneBannerDays_;
     ++day_;
     if (day_ > 30) {
         day_ = 1;
@@ -506,6 +506,7 @@ void City::DailyTick() {
     UpgradeAndOccupancyTick();
     RecalculateStats();
     RecalculateDemand();
+    CheckMilestones();
 
     int attempts = 2 + (gameSpeed_ >= 2 ? 1 : 0);
     TrySpawnBuildings(attempts);
@@ -519,6 +520,23 @@ void City::MonthlyTick() {
     lastIncome_ = projectedIncome_;
     lastExpenses_ = projectedExpenses_;
     money_ += lastIncome_ - lastExpenses_;
+    financialWarning_ = money_ < 0;
+}
+
+void City::CheckMilestones() {
+    while (population_ >= milestoneTarget_ && cityLevel_ < 6) {
+        ++cityLevel_;
+        lastMilestoneReward_ = 4000 + cityLevel_ * 2500;
+        money_ += lastMilestoneReward_;
+        maxBuildingLevel_ = std::min(3, cityLevel_ + 1);
+        milestoneBannerDays_ = 12;
+
+        if (cityLevel_ == 2) milestoneTarget_ = 350;
+        else if (cityLevel_ == 3) milestoneTarget_ = 800;
+        else if (cityLevel_ == 4) milestoneTarget_ = 1500;
+        else if (cityLevel_ == 5) milestoneTarget_ = 3000;
+        else milestoneTarget_ = 999999;
+    }
 }
 
 void City::TrySpawnBuildings(int attempts) {
@@ -664,7 +682,7 @@ void City::UpgradeAndOccupancyTick() {
         if (b.zone == Zone::Residential) fullness = b.capacity > 0 ? (float)b.occupants / b.capacity : 0.0f;
         else fullness = b.jobs > 0 ? (float)b.employees / b.jobs : 0.0f;
 
-        if (b.level < 3 && b.ageDays > 18 && fullness > 0.72f && b.landValue > (b.level == 1 ? 0.48f : 0.64f)) {
+        if (b.level < std::min(3, maxBuildingLevel_) && b.ageDays > 18 && fullness > 0.72f && b.landValue > (b.level == 1 ? 0.48f : 0.64f)) {
             int chance = b.level == 1 ? 12 : 6;
             if (GetRandomValue(0, 99) < chance) {
                 ++b.level;
@@ -695,6 +713,13 @@ void City::RecalculateStats() {
     happiness_ = happyWeight > 0 ? happinessWeighted / happyWeight : 0.58f;
     int workforce = std::max(0, (int)(population_ * 0.52f));
     unemployment_ = workforce > 0 ? Clamp((float)std::max(0, workforce - filledJobs_) / workforce, 0.0f, 1.0f) : 0.0f;
+
+    float utilityCoverage = buildings_.empty() ? 0.55f :
+        1.0f - (float)(unpoweredBuildings_ + unwateredBuildings_) / std::max(1.0f, (float)buildings_.size() * 2.0f);
+    float economy = projectedIncome_ >= projectedExpenses_ ? 1.0f : 0.45f;
+    float score = happiness_ * 0.44f + (1.0f - unemployment_) * 0.20f
+                + Clamp(utilityCoverage, 0.0f, 1.0f) * 0.26f + economy * 0.10f;
+    cityScore_ = (int)roundf(Clamp(score, 0.0f, 1.0f) * 100.0f);
 }
 
 void City::RecalculateDemand() {
@@ -790,49 +815,72 @@ Model City::BuildCellSurfaceModel(bool waterCells) const {
     mesh.colors = (unsigned char*)MemAlloc((size_t)mesh.vertexCount * 4 * sizeof(unsigned char));
 
     int vi = 0;
-    auto pushVertex = [&](float vx, float vy, float vz, Color c) {
-        int vbase = vi * 3;
-        mesh.vertices[vbase + 0] = vx;
-        mesh.vertices[vbase + 1] = vy;
-        mesh.vertices[vbase + 2] = vz;
-        int cbase = vi * 4;
-        mesh.colors[cbase + 0] = c.r;
-        mesh.colors[cbase + 1] = c.g;
-        mesh.colors[cbase + 2] = c.b;
-        mesh.colors[cbase + 3] = c.a;
+    auto pushVertex = [&](float vx, float vy, float vz, Color col) {
+        int vb = vi * 3;
+        mesh.vertices[vb] = vx; mesh.vertices[vb + 1] = vy; mesh.vertices[vb + 2] = vz;
+        int cb = vi * 4;
+        mesh.colors[cb] = col.r; mesh.colors[cb + 1] = col.g;
+        mesh.colors[cb + 2] = col.b; mesh.colors[cb + 3] = col.a;
         ++vi;
     };
 
-    const float half = CELL_SIZE * 0.5025f;
+    auto cornerHeight = [&](int cx, int cz) {
+        float sum = 0.0f;
+        int count = 0;
+        for (int dz = -1; dz <= 0; ++dz) {
+            for (int dx = -1; dx <= 0; ++dx) {
+                int sx = cx + dx;
+                int sz = cz + dz;
+                if (Inside(sx, sz)) {
+                    sum += TerrainHeight(sx, sz);
+                    ++count;
+                }
+            }
+        }
+        return count > 0 ? sum / count : 0.0f;
+    };
+
     for (int z = 0; z < GRID_H; ++z) {
         for (int x = 0; x < GRID_W; ++x) {
             if (IsWater(x, z) != waterCells) continue;
-            Vector3 p = GridToWorld(x, z);
-            float y = waterCells ? WATER_LEVEL - 0.045f : p.y - 0.018f;
-            Color c;
+
+            float x0 = (x - GRID_W / 2) * CELL_SIZE;
+            float x1 = x0 + CELL_SIZE;
+            float z0 = (z - GRID_H / 2) * CELL_SIZE;
+            float z1 = z0 + CELL_SIZE;
+
+            float y00, y10, y01, y11;
             if (waterCells) {
-                c = ((x + z) & 1) ? Color{50, 119, 159, 255} : Color{55, 126, 166, 255};
+                y00 = y10 = y01 = y11 = WATER_LEVEL - 0.035f;
+            } else {
+                y00 = cornerHeight(x, z) - 0.018f;
+                y10 = cornerHeight(x + 1, z) - 0.018f;
+                y01 = cornerHeight(x, z + 1) - 0.018f;
+                y11 = cornerHeight(x + 1, z + 1) - 0.018f;
+            }
+
+            Vector3 p = GridToWorld(x, z);
+            int variation = (int)(Hash01(x, z, 111) * 7.0f) - 3;
+            Color col;
+            if (waterCells) {
+                col = Color{(unsigned char)(49 + variation), (unsigned char)(121 + variation),
+                            (unsigned char)(163 + variation), 255};
             } else if (IsShore(x, z)) {
-                c = Color{171, 162, 122, 255};
+                col = Color{177, 168, 126, 255};
             } else if (p.y > 1.75f) {
-                c = Color{110, 121, 100, 255};
+                col = Color{107, 124, 99, 255};
             } else {
                 float shade = Clamp((p.y + 0.2f) / 2.5f, 0.0f, 1.0f);
-                int checker = ((x + z) & 1) ? 2 : -2;
-                c = Color{
-                    (unsigned char)(76 + shade * 16 + checker),
-                    (unsigned char)(123 + shade * 27 + checker),
-                    (unsigned char)(76 + shade * 15 + checker),
+                col = Color{
+                    (unsigned char)Clamp(74.0f + shade * 18.0f + variation, 0.0f, 255.0f),
+                    (unsigned char)Clamp(126.0f + shade * 26.0f + variation, 0.0f, 255.0f),
+                    (unsigned char)Clamp(77.0f + shade * 16.0f + variation, 0.0f, 255.0f),
                     255
                 };
             }
 
-            float x0 = p.x - half, x1 = p.x + half;
-            float z0 = p.z - half, z1 = p.z + half;
-            // Counter-clockwise when viewed from above: upward-facing normals.
-            // The previous order faced downward and WebGL back-face culling hid the map.
-            pushVertex(x0, y, z0, c); pushVertex(x1, y, z1, c); pushVertex(x1, y, z0, c);
-            pushVertex(x0, y, z0, c); pushVertex(x0, y, z1, c); pushVertex(x1, y, z1, c);
+            pushVertex(x0, y00, z0, col); pushVertex(x1, y11, z1, col); pushVertex(x1, y10, z0, col);
+            pushVertex(x0, y00, z0, col); pushVertex(x0, y01, z1, col); pushVertex(x1, y11, z1, col);
         }
     }
 
@@ -897,51 +945,61 @@ void City::DrawStreetLight(Vector3 p, bool alongX) const {
 void City::DrawRoadTile(int x, int z, bool detailed) const {
     Vector3 p = GridToWorld(x, z);
     float y = p.y + 0.025f;
-    Color asphalt{62, 66, 68, 255};
-    DrawCube({p.x, y, p.z}, CELL_SIZE * 0.98f, 0.10f, CELL_SIZE * 0.98f, asphalt);
+    Color asphalt{58, 64, 67, 255};
 
     bool n = RoadAt(x, z - 1), s = RoadAt(x, z + 1), e = RoadAt(x + 1, z), w = RoadAt(x - 1, z);
+    int connections = (n ? 1 : 0) + (s ? 1 : 0) + (e ? 1 : 0) + (w ? 1 : 0);
     bool horizontal = e || w;
     bool vertical = n || s;
-    Color line{210, 203, 157, 230};
+    bool turn = connections == 2 && horizontal && vertical;
+    bool roundedNode = connections != 2 || turn;
 
+    Color sidewalk{177, 177, 169, 255};
+    if (detailed && roundedNode) {
+        // Round sidewalk pad under endpoints, bends and junctions.
+        DrawCylinder({p.x, y - 0.025f, p.z}, CELL_SIZE * 0.50f, CELL_SIZE * 0.50f, 0.09f, 20, sidewalk);
+    }
+
+    DrawCube({p.x, y, p.z}, CELL_SIZE * 0.86f, 0.10f, CELL_SIZE * 0.86f, asphalt);
+    if (roundedNode) {
+        DrawCylinder({p.x, y + 0.002f, p.z}, CELL_SIZE * 0.405f, CELL_SIZE * 0.405f, 0.105f, 20, asphalt);
+    }
+
+    Color line{218, 208, 160, 230};
     if (!detailed) {
-        if (horizontal && !vertical) DrawCube({p.x, y + 0.06f, p.z}, CELL_SIZE * 0.52f, 0.018f, 0.035f, line);
-        else if (vertical && !horizontal) DrawCube({p.x, y + 0.06f, p.z}, 0.035f, 0.018f, CELL_SIZE * 0.52f, line);
+        if (horizontal && !vertical) DrawCube({p.x, y + 0.06f, p.z}, CELL_SIZE * 0.50f, 0.018f, 0.035f, line);
+        else if (vertical && !horizontal) DrawCube({p.x, y + 0.06f, p.z}, 0.035f, 0.018f, CELL_SIZE * 0.50f, line);
         return;
     }
 
-    Color curb{155, 157, 151, 255};
-    Color sidewalk{174, 172, 163, 255};
-    float sw = 0.20f;
-    if (!n) {
-        DrawCube({p.x, y + 0.08f, p.z - CELL_SIZE * 0.42f}, CELL_SIZE * 0.96f, 0.08f, sw, sidewalk);
-        DrawCube({p.x, y + 0.055f, p.z - CELL_SIZE * 0.33f}, CELL_SIZE * 0.96f, 0.07f, 0.035f, curb);
+    Color curb{148, 152, 149, 255};
+    float sw = 0.18f;
+    if (!n && !roundedNode) {
+        DrawCube({p.x, y + 0.08f, p.z - CELL_SIZE * 0.43f}, CELL_SIZE * 0.88f, 0.08f, sw, sidewalk);
+        DrawCube({p.x, y + 0.055f, p.z - CELL_SIZE * 0.34f}, CELL_SIZE * 0.88f, 0.07f, 0.035f, curb);
     }
-    if (!s) {
-        DrawCube({p.x, y + 0.08f, p.z + CELL_SIZE * 0.42f}, CELL_SIZE * 0.96f, 0.08f, sw, sidewalk);
-        DrawCube({p.x, y + 0.055f, p.z + CELL_SIZE * 0.33f}, CELL_SIZE * 0.96f, 0.07f, 0.035f, curb);
+    if (!s && !roundedNode) {
+        DrawCube({p.x, y + 0.08f, p.z + CELL_SIZE * 0.43f}, CELL_SIZE * 0.88f, 0.08f, sw, sidewalk);
+        DrawCube({p.x, y + 0.055f, p.z + CELL_SIZE * 0.34f}, CELL_SIZE * 0.88f, 0.07f, 0.035f, curb);
     }
-    if (!w) {
-        DrawCube({p.x - CELL_SIZE * 0.42f, y + 0.08f, p.z}, sw, 0.08f, CELL_SIZE * 0.96f, sidewalk);
-        DrawCube({p.x - CELL_SIZE * 0.33f, y + 0.055f, p.z}, 0.035f, 0.07f, CELL_SIZE * 0.96f, curb);
+    if (!w && !roundedNode) {
+        DrawCube({p.x - CELL_SIZE * 0.43f, y + 0.08f, p.z}, sw, 0.08f, CELL_SIZE * 0.88f, sidewalk);
+        DrawCube({p.x - CELL_SIZE * 0.34f, y + 0.055f, p.z}, 0.035f, 0.07f, CELL_SIZE * 0.88f, curb);
     }
-    if (!e) {
-        DrawCube({p.x + CELL_SIZE * 0.42f, y + 0.08f, p.z}, sw, 0.08f, CELL_SIZE * 0.96f, sidewalk);
-        DrawCube({p.x + CELL_SIZE * 0.33f, y + 0.055f, p.z}, 0.035f, 0.07f, CELL_SIZE * 0.96f, curb);
+    if (!e && !roundedNode) {
+        DrawCube({p.x + CELL_SIZE * 0.43f, y + 0.08f, p.z}, sw, 0.08f, CELL_SIZE * 0.88f, sidewalk);
+        DrawCube({p.x + CELL_SIZE * 0.34f, y + 0.055f, p.z}, 0.035f, 0.07f, CELL_SIZE * 0.88f, curb);
     }
 
     if (horizontal && !vertical) {
-        DrawCube({p.x - 0.48f, y + 0.06f, p.z}, 0.46f, 0.018f, 0.035f, line);
-        DrawCube({p.x + 0.48f, y + 0.06f, p.z}, 0.46f, 0.018f, 0.035f, line);
+        DrawCube({p.x, y + 0.061f, p.z}, CELL_SIZE * 0.52f, 0.018f, 0.035f, line);
     } else if (vertical && !horizontal) {
-        DrawCube({p.x, y + 0.06f, p.z - 0.48f}, 0.035f, 0.018f, 0.46f, line);
-        DrawCube({p.x, y + 0.06f, p.z + 0.48f}, 0.035f, 0.018f, 0.46f, line);
+        DrawCube({p.x, y + 0.061f, p.z}, 0.035f, 0.018f, CELL_SIZE * 0.52f, line);
     }
 
-    if (HashCell(x, z, 90) % 23u == 0u && (horizontal != vertical)) {
-        if (horizontal && !n) DrawStreetLight({p.x, p.y + 0.08f, p.z - CELL_SIZE * 0.42f}, true);
-        else if (vertical && !w) DrawStreetLight({p.x - CELL_SIZE * 0.42f, p.y + 0.08f, p.z}, false);
+    if (HashCell(x, z, 90) % 23u == 0u && connections == 2 && !turn) {
+        if (horizontal && !n) DrawStreetLight({p.x, p.y + 0.08f, p.z - CELL_SIZE * 0.43f}, true);
+        else if (vertical && !w) DrawStreetLight({p.x - CELL_SIZE * 0.43f, p.y + 0.08f, p.z}, false);
     }
 }
 
@@ -1064,29 +1122,33 @@ const char* City::ToolLabel(Tool tool) const {
 
 void City::DrawTopBar() const {
     const int w = GetScreenWidth();
+    DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
-    // Minimal top strip: the important management UI lives at the bottom,
-    // leaving as much of the map visible as possible.
-    DrawRectangle(0, 0, w, 44, Color{18, 27, 32, 238});
-    DrawText("CITY LAB", 18, 11, 21, Color{238, 244, 245, 255});
-    DrawText("v0.5", 116, 15, 13, Color{116, 181, 199, 255});
+    DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
+    DrawText("v0.6", 116, 14, 12, Color{103, 184, 205, 255});
+
+    std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
+    DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});
+
+    std::string score = "SCORE " + std::to_string(cityScore_);
+    DrawText(score.c_str(), 292, 14, 12, cityScore_ >= 70 ? Color{105, 201, 127, 255} : Color{220, 184, 92, 255});
 
     std::string date = std::to_string(day_) + "." + std::to_string(month_) + "." + std::to_string(year_);
-    int dateW = MeasureText(date.c_str(), 14);
-    DrawText(date.c_str(), w / 2 - dateW / 2, 15, 14, Color{194, 207, 211, 255});
+    int dateW = MeasureText(date.c_str(), 13);
+    DrawText(date.c_str(), w / 2 - dateW / 2, 14, 13, Color{193, 207, 211, 255});
 
     std::string fps = "FPS " + std::to_string(GetFPS());
     Color fpsColor = GetFPS() >= 45 ? Color{111, 199, 135, 255} : Color{232, 144, 91, 255};
-    DrawText(fps.c_str(), w - MeasureText(fps.c_str(), 13) - 18, 16, 13, fpsColor);
+    DrawText(fps.c_str(), w - MeasureText(fps.c_str(), 12) - 18, 15, 12, fpsColor);
 }
 
 void City::DrawToolPanel() const {
     const int sw = GetScreenWidth();
     const int sh = GetScreenHeight();
-    const float hudTop = (float)sh - 118.0f;
+    const float hudTop = (float)sh - 136.0f;
 
-    DrawRectangle(0, (int)hudTop, sw, 118, Color{23, 33, 38, 247});
-    DrawRectangle(0, (int)hudTop, sw, 1, Color{83, 109, 119, 255});
+    DrawRectangle(0, (int)hudTop, sw, 136, Color{20, 31, 36, 246});
+    DrawRectangle(0, (int)hudTop, sw, 1, Color{68, 101, 112, 255});
 
     const char* names[8] = {
         "STRASSE", "WOHNEN", "GEWERBE", "INDUSTRIE",
@@ -1097,104 +1159,134 @@ void City::DrawToolPanel() const {
         "ENTFERNEN", "CHF 6500", "CHF 3600", "CHF 1200"
     };
     const Color accents[8] = {
-        Color{151, 165, 171, 255},
-        Color{71, 190, 108, 255},
-        Color{65, 146, 232, 255},
-        Color{228, 177, 61, 255},
-        Color{218, 92, 83, 255},
-        Color{232, 192, 65, 255},
-        Color{72, 161, 222, 255},
-        Color{92, 184, 103, 255}
+        Color{151, 168, 175, 255}, Color{71, 190, 108, 255},
+        Color{65, 146, 232, 255}, Color{228, 177, 61, 255},
+        Color{218, 92, 83, 255}, Color{232, 192, 65, 255},
+        Color{72, 161, 222, 255}, Color{92, 184, 103, 255}
     };
 
-    const float gap = 6.0f;
-    float toolW = ((float)sw - 36.0f - gap * 7.0f) / 8.0f;
-    toolW = Clamp(toolW, 92.0f, 150.0f);
+    const float gap = 7.0f;
+    float toolW = ((float)sw - 32.0f - gap * 7.0f) / 8.0f;
+    toolW = Clamp(toolW, 88.0f, 145.0f);
     float totalW = toolW * 8.0f + gap * 7.0f;
     float startX = ((float)sw - totalW) * 0.5f;
-    float y = hudTop + 53.0f;
+    float y = hudTop + 70.0f;
 
     for (int i = 0; i < 8; ++i) {
-        Rectangle r{startX + i * (toolW + gap), y, toolW, 52.0f};
+        Rectangle r{startX + i * (toolW + gap), y, toolW, 54.0f};
         bool selected = (int)tool_ == i;
-        Color bg = selected ? Color{55, 72, 79, 255} : Color{34, 45, 50, 255};
-        DrawRectangleRounded(r, 0.10f, 6, bg);
-        DrawRectangle((int)r.x, (int)r.y, (int)r.width, selected ? 5 : 3, accents[i]);
-        if (selected) DrawRectangleLinesEx(r, 1.5f, Color{139, 190, 204, 255});
+        Color bg = selected ? Color{55, 77, 85, 255} : Color{31, 44, 50, 255};
 
+        DrawRectangleRounded(r, 0.34f, 10, bg);
+        if (selected) DrawRectangleLinesEx(r, 1.6f, accents[i]);
+
+        Vector2 icon{r.x + 20.0f, r.y + 19.0f};
+        DrawCircleV(icon, 11.0f, selected ? accents[i] : Color{58, 74, 80, 255});
         std::string key = std::to_string(i + 1);
-        DrawText(key.c_str(), (int)r.x + 8, (int)r.y + 10, 11, Color{147, 162, 167, 255});
-        DrawText(names[i], (int)r.x + 23, (int)r.y + 9, 12, Color{235, 240, 241, 255});
-        DrawText(prices[i], (int)r.x + 8, (int)r.y + 31, 10,
-                 selected ? Color{197, 220, 226, 255} : Color{145, 158, 162, 255});
+        DrawText(key.c_str(), (int)icon.x - 3, (int)icon.y - 5, 10, Color{245, 247, 247, 255});
+
+        int nameSize = toolW < 108.0f ? 10 : 11;
+        DrawText(names[i], (int)r.x + 38, (int)r.y + 11, nameSize, Color{236, 241, 242, 255});
+        DrawText(prices[i], (int)r.x + 12, (int)r.y + 35, 9,
+                 selected ? Color{196, 221, 227, 255} : Color{139, 155, 161, 255});
     }
 }
 
 void City::DrawDemandPanel() const {
     const int sw = GetScreenWidth();
     const int sh = GetScreenHeight();
-    const int y = sh - 105;
-    const int center = sw / 2;
+    const int y = sh - 125;
+    const int x = (int)(sw * 0.42f) + 8;
+    const int groupW = (int)(sw * 0.22f) - 16;
 
-    DrawText("NACHFRAGE", center - 138, y + 2, 10, Color{139, 154, 160, 255});
+    DrawText("NACHFRAGE", x, y, 9, Color{137, 155, 161, 255});
+    int barW = std::max(34, (groupW - 70) / 3);
 
-    DrawText("W", center - 60, y + 1, 11, Color{90, 207, 121, 255});
-    DrawBar(center - 44, y + 4, 70, residentialDemand_, Color{71, 190, 108, 255});
+    int bx = x + 72;
+    DrawText("W", bx - 14, y, 10, Color{83, 205, 117, 255});
+    DrawBar(bx, y + 2, barW, residentialDemand_, Color{71, 190, 108, 255});
 
-    DrawText("G", center + 40, y + 1, 11, Color{91, 165, 238, 255});
-    DrawBar(center + 56, y + 4, 70, commercialDemand_, Color{65, 146, 232, 255});
+    bx += barW + 30;
+    DrawText("G", bx - 14, y, 10, Color{89, 163, 236, 255});
+    DrawBar(bx, y + 2, barW, commercialDemand_, Color{65, 146, 232, 255});
 
-    DrawText("I", center + 140, y + 1, 11, Color{235, 190, 75, 255});
-    DrawBar(center + 153, y + 4, 70, industrialDemand_, Color{228, 177, 61, 255});
+    bx += barW + 30;
+    DrawText("I", bx - 12, y, 10, Color{234, 188, 72, 255});
+    DrawBar(bx, y + 2, barW, industrialDemand_, Color{228, 177, 61, 255});
 }
 
 void City::DrawInfoPanel() const {
     const int sw = GetScreenWidth();
     const int sh = GetScreenHeight();
-    const float hudTop = (float)sh - 118.0f;
-    const int y = (int)hudTop + 10;
+    const float hudTop = (float)sh - 136.0f;
+    const int y = (int)hudTop + 13;
 
+    int netValue = projectedIncome_ - projectedExpenses_;
     std::string money = "CHF " + std::to_string(money_);
     std::string pop = std::to_string(population_) + " Einwohner";
     std::string jobs = std::to_string(filledJobs_) + "/" + std::to_string(totalJobs_) + " Jobs";
-    int netValue = projectedIncome_ - projectedExpenses_;
     std::string net = std::string(netValue >= 0 ? "+" : "") + std::to_string(netValue) + " / Monat";
 
-    DrawText(money.c_str(), 18, y, 15, Color{234, 240, 241, 255});
-    DrawText(pop.c_str(), 150, y, 13, Color{202, 214, 217, 255});
-    DrawText(jobs.c_str(), 276, y, 13, Color{202, 214, 217, 255});
-    DrawText(net.c_str(), 392, y, 13, netValue >= 0 ? Color{103, 201, 126, 255} : Color{229, 112, 92, 255});
+    // Left 42%: economy / population.
+    DrawText(money.c_str(), 18, y, 14, financialWarning_ ? Color{236, 105, 85, 255} : Color{235, 241, 242, 255});
+    DrawText(pop.c_str(), 132, y, 11, Color{198, 213, 217, 255});
+    DrawText(jobs.c_str(), 258, y, 11, Color{198, 213, 217, 255});
+    DrawText(net.c_str(), 365, y, 11, netValue >= 0 ? Color{103, 201, 126, 255} : Color{229, 112, 92, 255});
 
+    // Right service column ends before speed controls.
+    int ux = (int)(sw * 0.64f) + 10;
     std::string power = "STROM " + std::to_string(powerUsed_) + "/" + std::to_string(powerCapacity_);
     std::string water = "WASSER " + std::to_string(waterUsed_) + "/" + std::to_string(waterCapacity_);
-    std::string happy = "ZUFRIEDEN " + std::to_string((int)(happiness_ * 100.0f)) + "%";
-    DrawText(power.c_str(), sw / 2 + 250, y, 11,
+    std::string happy = "GLUECK " + std::to_string((int)(happiness_ * 100.0f)) + "%";
+
+    DrawText(power.c_str(), ux, y, 10,
              powerCapacity_ > 0 && powerUsed_ <= powerCapacity_ ? Color{226, 198, 83, 255} : Color{229, 104, 84, 255});
-    DrawText(water.c_str(), sw / 2 + 350, y, 11,
+    DrawText(water.c_str(), ux + 92, y, 10,
              waterCapacity_ > 0 && waterUsed_ <= waterCapacity_ ? Color{80, 164, 229, 255} : Color{229, 104, 84, 255});
-    DrawText(happy.c_str(), sw / 2 + 460, y, 11, Color{165, 207, 175, 255});
+    DrawText(happy.c_str(), ux + 192, y, 10, Color{159, 207, 172, 255});
 
     const char* speedLabels[4] = {"II", "1x", "2x", "3x"};
     for (int i = 0; i < 4; ++i) {
-        Rectangle r{(float)sw - 210.0f + i * 48.0f, hudTop + 9.0f, 42.0f, 30.0f};
+        Rectangle r{(float)sw - 206.0f + i * 46.0f, hudTop + 10.0f, 40.0f, 32.0f};
         bool selected = gameSpeed_ == i;
-        DrawRectangleRounded(r, 0.16f, 6, selected ? Color{67, 98, 108, 255} : Color{37, 49, 54, 255});
-        if (selected) DrawRectangleLinesEx(r, 1.2f, Color{133, 188, 202, 255});
-        DrawText(speedLabels[i], (int)r.x + 11, (int)r.y + 8, 12, Color{234, 239, 240, 255});
+        DrawRectangleRounded(r, 0.48f, 12, selected ? Color{69, 104, 116, 255} : Color{34, 48, 54, 255});
+        if (selected) DrawRectangleLinesEx(r, 1.2f, Color{128, 188, 204, 255});
+        DrawText(speedLabels[i], (int)r.x + 10, (int)r.y + 9, 11, Color{235, 240, 241, 255});
+    }
+}
+
+void City::DrawProgressPanel() const {
+    const int sw = GetScreenWidth();
+    const float progress = milestoneTarget_ > 0 ? Clamp((float)population_ / milestoneTarget_, 0.0f, 1.0f) : 1.0f;
+
+    Rectangle card{16.0f, 52.0f, 268.0f, 48.0f};
+    DrawRectangleRounded(card, 0.30f, 10, Color{20, 31, 36, 205});
+    std::string title = "Stadtstufe " + std::to_string(cityLevel_) + "  |  Score " + std::to_string(cityScore_) + "/100";
+    DrawText(title.c_str(), 29, 62, 11, Color{224, 234, 236, 255});
+
+    if (milestoneTarget_ < 900000) {
+        std::string goal = "Naechstes Ziel: " + std::to_string(population_) + " / " + std::to_string(milestoneTarget_);
+        DrawText(goal.c_str(), 29, 80, 10, Color{161, 181, 187, 255});
+        DrawBar(150, 82, 116, progress, Color{86, 176, 197, 255});
+    } else {
+        DrawText("Metropole erreicht", 29, 80, 10, Color{110, 204, 132, 255});
     }
 
-    if (unpoweredBuildings_ > 0 || unwateredBuildings_ > 0 || services_.empty()) {
-        std::string warn;
-        if (services_.empty()) warn = "Baue Strom + Wasser, bevor die ersten Zonen wachsen.";
-        else {
-            if (unpoweredBuildings_ > 0) warn += std::to_string(unpoweredBuildings_) + " Gebaeude ohne Strom  ";
-            if (unwateredBuildings_ > 0) warn += std::to_string(unwateredBuildings_) + " Gebaeude ohne Wasser";
-        }
+    if (milestoneBannerDays_ > 0 && lastMilestoneReward_ > 0) {
+        std::string msg = "MEILENSTEIN! Stadtstufe " + std::to_string(cityLevel_) +
+                          "  +CHF " + std::to_string(lastMilestoneReward_);
+        int tw = MeasureText(msg.c_str(), 13);
+        Rectangle banner{sw * 0.5f - tw * 0.5f - 18.0f, 55.0f, (float)tw + 36.0f, 32.0f};
+        DrawRectangleRounded(banner, 0.48f, 12, Color{43, 75, 65, 235});
+        DrawText(msg.c_str(), (int)banner.x + 18, (int)banner.y + 9, 13, Color{159, 230, 176, 255});
+    }
 
-        int tw = MeasureText(warn.c_str(), 12);
-        Rectangle chip{(float)sw / 2.0f - tw / 2.0f - 12.0f, hudTop - 31.0f, (float)tw + 24.0f, 24.0f};
-        DrawRectangleRounded(chip, 0.35f, 6, Color{51, 55, 48, 232});
-        DrawText(warn.c_str(), (int)chip.x + 12, (int)chip.y + 6, 12, Color{235, 205, 105, 255});
+    if (financialWarning_) {
+        const char* msg = "Budget negativ - reduziere Unterhalt oder baue mehr Steuerbasis.";
+        int tw = MeasureText(msg, 10);
+        Rectangle warn{(float)sw - tw - 32.0f, 54.0f, (float)tw + 18.0f, 25.0f};
+        DrawRectangleRounded(warn, 0.40f, 10, Color{82, 43, 40, 225});
+        DrawText(msg, (int)warn.x + 9, (int)warn.y + 7, 10, Color{242, 155, 137, 255});
     }
 }
 
@@ -1203,4 +1295,5 @@ void City::DrawUI() const {
     DrawToolPanel();
     DrawDemandPanel();
     DrawInfoPanel();
+    DrawProgressPanel();
 }

@@ -290,6 +290,24 @@ void BuildingRenderer::DrawBuilding(const Building& b, Vector3 center, float lot
     else if (b.zone == Zone::Commercial) DrawCommercial(b, center, lotWidth, lotDepth);
     else if (b.zone == Zone::Industrial) DrawIndustrial(b, center, lotWidth, lotDepth);
 
+    // Rounded annexes/towers break up the box-only silhouette while keeping the
+    // procedural system lightweight enough for WebGL.
+    if (b.zone == Zone::Residential && b.level >= 2 && (b.variant % 4 == 3)) {
+        float h = 1.8f + b.level * 0.75f;
+        float r = std::min(lotWidth, lotDepth) * 0.17f;
+        Vector3 q{center.x + lotWidth * 0.23f, center.y + 0.08f, center.z - lotDepth * 0.18f};
+        DrawCylinder({q.x, q.y, q.z}, r, r, h, 18, Color{203, 210, 207, 255});
+        for (int f = 1; f < b.level + 2; ++f) {
+            DrawCylinder({q.x, q.y + f * h / (b.level + 2.0f), q.z}, r * 1.015f, r * 1.015f, 0.045f, 18, Color{91, 142, 166, 255});
+        }
+    } else if (b.zone == Zone::Commercial && b.level >= 2 && (b.variant % 3 == 1)) {
+        float h = 2.4f + b.level * 0.95f;
+        float r = std::min(lotWidth, lotDepth) * 0.20f;
+        Vector3 q{center.x - lotWidth * 0.18f, center.y + 0.08f, center.z};
+        DrawCylinder({q.x, q.y, q.z}, r * 0.90f, r, h, 20, Color{105, 151, 171, 255});
+        DrawCylinder({q.x, q.y + h, q.z}, r * 0.72f, r * 0.90f, 0.22f, 20, Color{66, 83, 92, 255});
+    }
+
     if (!b.powered) {
         DrawCylinder({center.x, center.y + 0.22f, center.z}, 0.05f, 0.05f, 0.42f, 6, Color{232, 183, 54, 255});
     }
@@ -317,13 +335,16 @@ void BuildingRenderer::DrawService(const ServiceStructure& s, Vector3 p, float l
         DrawCylinder({p.x, top, p.z}, 0.58f, 0.72f, 0.88f, 16, metal);
         DrawCylinder({p.x, top + 0.50f, p.z}, 0.06f, 0.56f, 0.22f, 16, Shift(metal, -12));
     } else {
-        Color path{188, 177, 151, 255};
-        DrawCube({p.x, groundY + 0.035f, p.z}, lotW * 0.82f, 0.05f, lotD * 0.82f, Color{83, 137, 78, 255});
-        DrawCube({p.x, groundY + 0.065f, p.z}, lotW * 0.14f, 0.04f, lotD * 0.74f, path);
-        DrawCube({p.x, groundY + 0.067f, p.z}, lotW * 0.72f, 0.04f, lotD * 0.14f, path);
+        Color path{190, 180, 153, 255};
+        Color grass{78, 139, 78, 255};
+        float radius = std::min(lotW, lotD) * 0.40f;
+        DrawCylinder({p.x, groundY + 0.015f, p.z}, radius, radius, 0.055f, 24, grass);
+        DrawCylinder({p.x, groundY + 0.055f, p.z}, radius * 0.52f, radius * 0.52f, 0.035f, 24, path);
+        DrawCylinder({p.x, groundY + 0.080f, p.z}, radius * 0.30f, radius * 0.30f, 0.045f, 24, grass);
         DrawTree({p.x - lotW * 0.27f, groundY, p.z - lotD * 0.25f}, 0.92f, s.x * 13 + s.z * 7);
         DrawTree({p.x + lotW * 0.29f, groundY, p.z + lotD * 0.24f}, 0.82f, s.x * 17 + s.z * 11);
         DrawTree({p.x + lotW * 0.25f, groundY, p.z - lotD * 0.27f}, 0.72f, s.x * 5 + s.z * 19);
-        DrawCube({p.x - lotW * 0.20f, groundY + 0.12f, p.z + lotD * 0.10f}, 0.50f, 0.10f, 0.13f, Color{122, 92, 62, 255});
+        DrawCylinder({p.x, groundY + 0.12f, p.z}, 0.18f, 0.22f, 0.24f, 18, Color{128, 142, 145, 255});
+        DrawSphereEx({p.x, groundY + 0.31f, p.z}, 0.13f, 4, 8, Color{78, 164, 205, 210});
     }
 }
