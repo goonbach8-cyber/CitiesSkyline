@@ -38,6 +38,7 @@ if(EMSCRIPTEN)
   target_link_options(CitiesSkylineCpp PRIVATE
     "-sUSE_GLFW=3"
     "-sALLOW_MEMORY_GROWTH=1"
+    "-sEXPORTED_RUNTIME_METHODS=[]"
     "--shell-file" "${CMAKE_SOURCE_DIR}/web/shell.html"
   )
 endif()

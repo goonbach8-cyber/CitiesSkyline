@@ -25,6 +25,22 @@ float DistSq(float ax, float az, float bx, float bz) {
     float dz = az - bz;
     return dx * dx + dz * dz;
 }
+
+constexpr int ROAD_DIRS[8][2] = {
+    {0,-1},{1,-1},{1,0},{1,1},
+    {0,1},{-1,1},{-1,0},{-1,-1}
+};
+
+int RoadDirIndex(int dx, int dz) {
+    for (int i = 0; i < 8; ++i) {
+        if (ROAD_DIRS[i][0] == dx && ROAD_DIRS[i][1] == dz) return i;
+    }
+    return -1;
+}
+
+int OppositeRoadDir(int dir) {
+    return (dir + 4) & 7;
+}
 }
 
 City::City() {
@@ -33,10 +49,15 @@ City::City() {
     BuildTerrainModels();
 
     // Small starter road so the player immediately has a visible anchor.
+    int previousX = -1;
     for (int x = 38; x <= 53; ++x) {
         if (!IsWater(x, 48)) {
             roads_[48][x] = true;
             ++roadCount_;
+            if (previousX >= 0) LinkRoadCells(previousX, 48, x, 48);
+            previousX = x;
+        } else {
+            previousX = -1;
         }
     }
     RecalculateBudgetPreview();
@@ -162,6 +183,36 @@ bool City::MouseToGrid(const Camera3D& camera, int& gx, int& gz) const {
 
 bool City::RoadAt(int x, int z) const {
     return Inside(x, z) && roads_[z][x];
+}
+
+bool City::RoadConnected(int x, int z, int nx, int nz) const {
+    if (!RoadAt(x, z) || !RoadAt(nx, nz)) return false;
+    int dir = RoadDirIndex(nx - x, nz - z);
+    if (dir < 0) return false;
+    return (roadLinks_[z][x] & (1u << dir)) != 0;
+}
+
+void City::LinkRoadCells(int x, int z, int nx, int nz) {
+    if (!Inside(x, z) || !Inside(nx, nz)) return;
+    int dir = RoadDirIndex(nx - x, nz - z);
+    if (dir < 0) return;
+    roads_[z][x] = true;
+    roads_[nz][nx] = true;
+    roadLinks_[z][x] |= (unsigned char)(1u << dir);
+    roadLinks_[nz][nx] |= (unsigned char)(1u << OppositeRoadDir(dir));
+}
+
+void City::UnlinkRoadCell(int x, int z) {
+    if (!Inside(x, z)) return;
+    unsigned char links = roadLinks_[z][x];
+    for (int dir = 0; dir < 8; ++dir) {
+        if ((links & (1u << dir)) == 0) continue;
+        int nx = x + ROAD_DIRS[dir][0];
+        int nz = z + ROAD_DIRS[dir][1];
+        if (!Inside(nx, nz)) continue;
+        roadLinks_[nz][nx] &= (unsigned char)~(1u << OppositeRoadDir(dir));
+    }
+    roadLinks_[z][x] = 0;
 }
 
 bool City::BuildingContains(const Building& b, int x, int z) const {
@@ -290,6 +341,15 @@ void City::SetTool(Tool tool) {
     dragging_ = false;
 }
 
+void City::SelectToolExternal(int tool) {
+    if (tool < 0 || tool > 7) return;
+    SetTool((Tool)tool);
+}
+
+void City::SetGameSpeedExternal(int speed) {
+    gameSpeed_ = std::max(0, std::min(3, speed));
+}
+
 void City::Update(float dt, const Camera3D& camera) {
     HandleInput(camera);
     Simulate(dt);
@@ -297,6 +357,10 @@ void City::Update(float dt, const Camera3D& camera) {
 }
 
 void City::HandleUIInput() {
+#if defined(PLATFORM_WEB)
+    // Web uses the HTML/CSS HUD in shell.html.
+    return;
+#else
     Vector2 m = GetMousePosition();
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
 
@@ -316,21 +380,7 @@ void City::HandleUIInput() {
             return;
         }
     }
-
-    const float gap = 7.0f;
-    float toolW = ((float)sw - 32.0f - gap * 7.0f) / 8.0f;
-    toolW = Clamp(toolW, 88.0f, 145.0f);
-    float totalW = toolW * 8.0f + gap * 7.0f;
-    float startX = ((float)sw - totalW) * 0.5f;
-    float buttonY = hudTop + 70.0f;
-
-    for (int i = 0; i < 8; ++i) {
-        Rectangle r{startX + i * (toolW + gap), buttonY, toolW, 54.0f};
-        if (CheckCollisionPointRec(m, r)) {
-            SetTool((Tool)i);
-            return;
-        }
-    }
+#endif
 }
 
 void City::HandleInput(const Camera3D& camera) {
@@ -355,8 +405,12 @@ void City::HandleInput(const Camera3D& camera) {
     }
 
     Vector2 m = GetMousePosition();
+#if defined(PLATFORM_WEB)
+    if (m.y < 8.0f) return;
+#else
     const float hudTop = (float)GetScreenHeight() - 136.0f;
     if (m.y < 42.0f || m.y > hudTop) return;
+#endif
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hoverX_ >= 0) {
         if (tool_ == Tool::Bulldoze) {
@@ -386,33 +440,49 @@ void City::HandleInput(const Camera3D& camera) {
 }
 
 void City::PlaceRoadLine(int x0, int z0, int x1, int z1) {
-    auto place = [&](int x, int z) {
-        if (!Inside(x, z) || RoadAt(x, z) || IsWater(x, z) || money_ < 120) return;
-        if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) return;
-        roads_[z][x] = true;
-        zones_[z][x] = Zone::None;
-        money_ -= 120;
-        ++roadCount_;
-    };
+    int rawDx = x1 - x0;
+    int rawDz = z1 - z0;
+    if (rawDx == 0 && rawDz == 0) return;
 
-    // Bresenham line: unlike the old axis-locked tool this supports arbitrary
-    // angles, which immediately makes layouts feel less like a spreadsheet.
-    int x = x0;
-    int z = z0;
-    int dx = std::abs(x1 - x0);
-    int dz = std::abs(z1 - z0);
-    int sx = x0 < x1 ? 1 : -1;
-    int sz = z0 < z1 ? 1 : -1;
-    int err = dx - dz;
+    // Snap to the nearest 45 degrees. This version deliberately favours stable,
+    // clean roads over arbitrary-angle zig-zags. True splines come next.
+    float angle = atan2f((float)rawDz, (float)rawDx);
+    const float step = PI / 4.0f;
+    float snapped = roundf(angle / step) * step;
+    int dirX = (int)roundf(cosf(snapped));
+    int dirZ = (int)roundf(sinf(snapped));
+    int length = std::max(abs(rawDx), abs(rawDz));
 
-    while (true) {
-        place(x, z);
-        if (x == x1 && z == z1) break;
-        int e2 = err * 2;
-        if (e2 > -dz) { err -= dz; x += sx; }
-        if (e2 <  dx) { err += dx; z += sz; }
+    int prevX = x0;
+    int prevZ = z0;
+    bool havePrev = false;
+
+    for (int i = 0; i <= length; ++i) {
+        int x = x0 + dirX * i;
+        int z = z0 + dirZ * i;
+
+        if (!Inside(x, z) || IsWater(x, z)) break;
+        if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) break;
+
+        if (!RoadAt(x, z)) {
+            if (money_ < 120) break;
+            roads_[z][x] = true;
+            roadLinks_[z][x] = 0;
+            zones_[z][x] = Zone::None;
+            money_ -= 120;
+            ++roadCount_;
+        }
+
+        if (havePrev && (prevX != x || prevZ != z)) {
+            LinkRoadCells(prevX, prevZ, x, z);
+        }
+
+        prevX = x;
+        prevZ = z;
+        havePrev = true;
     }
 
+    vehicles_.clear();
     RecalculateBudgetPreview();
 }
 
@@ -442,8 +512,10 @@ void City::BulldozeAt(int x, int z) {
             services_.erase(services_.begin() + si);
             money_ -= 100;
         } else if (RoadAt(x, z)) {
+            UnlinkRoadCell(x, z);
             roads_[z][x] = false;
             roadCount_ = std::max(0, roadCount_ - 1);
+            vehicles_.clear();
             money_ -= 20;
         } else if (Inside(x, z)) {
             zones_[z][x] = Zone::None;
@@ -515,24 +587,19 @@ void City::SpawnVehicle() {
 bool City::PickNextRoadCell(Vehicle& v) {
     int candidates[8][2];
     int count = 0;
-    const int dirs[8][2] = {
-        {1,0},{-1,0},{0,1},{0,-1},
-        {1,1},{1,-1},{-1,1},{-1,-1}
-    };
 
-    for (const auto& d : dirs) {
-        int nx = v.x + d[0];
-        int nz = v.z + d[1];
-        if (!RoadAt(nx, nz)) continue;
+    for (int dir = 0; dir < 8; ++dir) {
+        if ((roadLinks_[v.z][v.x] & (1u << dir)) == 0) continue;
+        int nx = v.x + ROAD_DIRS[dir][0];
+        int nz = v.z + ROAD_DIRS[dir][1];
 
-        // Prefer continuing forward instead of immediately making a U-turn.
         if (nx == v.prevX && nz == v.prevZ) continue;
         candidates[count][0] = nx;
         candidates[count][1] = nz;
         ++count;
     }
 
-    if (count == 0 && v.prevX >= 0 && RoadAt(v.prevX, v.prevZ)) {
+    if (count == 0 && v.prevX >= 0 && RoadConnected(v.x, v.z, v.prevX, v.prevZ)) {
         v.nextX = v.prevX;
         v.nextZ = v.prevZ;
         return true;
@@ -1119,7 +1186,7 @@ void City::DrawRoadTile(int x, int z, bool detailed) const {
 
 void City::DrawRoads(const Camera3D& camera) const {
     float cameraDistance = Vector3Distance(camera.position, camera.target);
-    float visibleRadius = cameraDistance * 1.80f + 34.0f;
+    float visibleRadius = cameraDistance * 1.85f + 36.0f;
     float visibleSq = visibleRadius * visibleRadius;
 
     auto strip = [](Vector3 a, Vector3 b, float halfWidth, float lift, Color col) {
@@ -1139,51 +1206,42 @@ void City::DrawRoads(const Camera3D& camera) const {
         DrawTriangle3D(aL,bR,aR,col);
     };
 
-    const float sidewalkHalf = CELL_SIZE * 0.39f;
-    const float roadHalf = CELL_SIZE * 0.30f;
-    Color sidewalk{169, 170, 164, 255};
-    Color asphalt{54, 60, 64, 255};
-    Color lane{218, 211, 170, 205};
-
-    // Connect each node only in forward directions to avoid duplicate geometry.
-    const int dirs[4][2] = {{1,0},{0,1},{1,1},{1,-1}};
+    const float sidewalkHalf = CELL_SIZE * 0.41f;
+    const float roadHalf = CELL_SIZE * 0.31f;
+    Color sidewalk{181, 182, 177, 255};
+    Color asphalt{51, 57, 61, 255};
+    Color lane{226, 219, 181, 205};
 
     for (int z=0; z<GRID_H; ++z) {
         for (int x=0; x<GRID_W; ++x) {
             if (!RoadAt(x,z)) continue;
+
             Vector3 p = GridToWorld(x,z);
             float dx=p.x-camera.target.x, dz=p.z-camera.target.z;
             if (dx*dx+dz*dz > visibleSq) continue;
 
-            // Rounded node hides the underlying cell structure at intersections and corners.
-            DrawCylinder({p.x,p.y+0.028f,p.z}, sidewalkHalf, sidewalkHalf, 0.075f, 20, sidewalk);
-            DrawCylinder({p.x,p.y+0.072f,p.z}, roadHalf, roadHalf, 0.085f, 20, asphalt);
+            // High-segment round nodes create smooth joins without accidental links.
+            DrawCylinder({p.x,p.y+0.030f,p.z}, sidewalkHalf, sidewalkHalf, 0.078f, 28, sidewalk);
+            DrawCylinder({p.x,p.y+0.076f,p.z}, roadHalf, roadHalf, 0.090f, 28, asphalt);
 
-            for (const auto& d : dirs) {
-                int nx=x+d[0], nz=z+d[1];
-                if (!RoadAt(nx,nz)) continue;
+            unsigned char links = roadLinks_[z][x];
+            for (int dir=0; dir<8; ++dir) {
+                if ((links & (1u << dir)) == 0) continue;
+
+                int nx=x+ROAD_DIRS[dir][0], nz=z+ROAD_DIRS[dir][1];
+                if (!Inside(nx,nz)) continue;
+
+                // Draw each graph edge once.
+                if (nz < z || (nz == z && nx < x)) continue;
+
                 Vector3 q=GridToWorld(nx,nz);
-
-                // Avoid visually cutting across a corner if a diagonal connection is only
-                // incidental to two orthogonal road cells.
-                if (d[0] != 0 && d[1] != 0) {
-                    bool orthA = RoadAt(x+d[0],z);
-                    bool orthB = RoadAt(x,z+d[1]);
-                    if (orthA && orthB) continue;
-                }
-
-                strip(p,q,sidewalkHalf,0.050f,sidewalk);
-                strip(p,q,roadHalf,0.095f,asphalt);
-
-                float segLen = sqrtf((q.x-p.x)*(q.x-p.x)+(q.z-p.z)*(q.z-p.z));
-                if (segLen > CELL_SIZE*0.95f) {
-                    strip(p,q,0.018f,0.145f,lane);
-                }
+                strip(p,q,sidewalkHalf,0.052f,sidewalk);
+                strip(p,q,roadHalf,0.100f,asphalt);
+                strip(p,q,0.018f,0.151f,lane);
             }
 
-            unsigned int lampHash = HashCell(x,z,90);
-            if (lampHash % 17u == 0u) {
-                DrawStreetLight({p.x + sidewalkHalf*0.88f,p.y+0.09f,p.z}, false);
+            if (HashCell(x,z,90) % 21u == 0u) {
+                DrawStreetLight({p.x + sidewalkHalf*0.90f,p.y+0.10f,p.z}, false);
             }
         }
     }
@@ -1326,7 +1384,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.7", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.8", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});

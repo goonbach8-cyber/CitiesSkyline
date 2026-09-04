@@ -17,6 +17,32 @@ public:
     void Draw3D(const Camera3D& camera) const;
     void DrawUI() const;
 
+    // Lightweight bridge used by the browser HUD.
+    void SelectToolExternal(int tool);
+    void SetGameSpeedExternal(int speed);
+    int Money() const { return money_; }
+    int Population() const { return population_; }
+    int FilledJobs() const { return filledJobs_; }
+    int TotalJobs() const { return totalJobs_; }
+    int NetMonthly() const { return projectedIncome_ - projectedExpenses_; }
+    int PowerUsed() const { return powerUsed_; }
+    int PowerCapacity() const { return powerCapacity_; }
+    int WaterUsed() const { return waterUsed_; }
+    int WaterCapacity() const { return waterCapacity_; }
+    int HappinessPercent() const { return (int)(happiness_ * 100.0f); }
+    int ResidentialDemandPercent() const { return (int)(residentialDemand_ * 100.0f); }
+    int CommercialDemandPercent() const { return (int)(commercialDemand_ * 100.0f); }
+    int IndustrialDemandPercent() const { return (int)(industrialDemand_ * 100.0f); }
+    int CityLevel() const { return cityLevel_; }
+    int CityScore() const { return cityScore_; }
+    int MilestoneTarget() const { return milestoneTarget_; }
+    int GameSpeed() const { return gameSpeed_; }
+    int SelectedTool() const { return (int)tool_; }
+    int VehicleCount() const { return (int)vehicles_.size(); }
+    int Day() const { return day_; }
+    int Month() const { return month_; }
+    int Year() const { return year_; }
+
 private:
     struct NaturalProp {
         int x = 0;
@@ -53,6 +79,9 @@ private:
     float Hash01(int x, int z, int salt = 0) const;
 
     bool RoadAt(int x, int z) const;
+    bool RoadConnected(int x, int z, int nx, int nz) const;
+    void LinkRoadCells(int x, int z, int nx, int nz);
+    void UnlinkRoadCell(int x, int z);
     bool BuildingContains(const Building& b, int x, int z) const;
     int BuildingIndexAt(int x, int z) const;
     int ServiceIndexAt(int x, int z) const;
@@ -114,6 +143,7 @@ private:
     const char* ToolLabel(Tool tool) const;
 
     bool roads_[GRID_H][GRID_W]{};
+    unsigned char roadLinks_[GRID_H][GRID_W]{};
     Zone zones_[GRID_H][GRID_W]{};
     float terrainHeights_[GRID_H][GRID_W]{};
     bool waterCells_[GRID_H][GRID_W]{};
