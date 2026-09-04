@@ -1371,11 +1371,11 @@ void City::DrawRoads(const Camera3D& camera) const {
 
     auto strip = [](Vector3 a, Vector3 b, float halfWidth, float lift, Color col) {
         Vector3 d{b.x-a.x, 0.0f, b.z-a.z};
-        float len = sqrtf(d.x*d.x + d.z*d.z);
-        if (len < 0.001f) return;
-        d.x /= len; d.z /= len;
-        Vector3 side{-d.z*halfWidth, 0.0f, d.x*halfWidth};
-        a.y += lift; b.y += lift;
+        float len=sqrtf(d.x*d.x+d.z*d.z);
+        if(len<0.001f) return;
+        d.x/=len; d.z/=len;
+        Vector3 side{-d.z*halfWidth,0.0f,d.x*halfWidth};
+        a.y+=lift; b.y+=lift;
 
         Vector3 aL{a.x+side.x,a.y,a.z+side.z};
         Vector3 aR{a.x-side.x,a.y,a.z-side.z};
@@ -1386,123 +1386,87 @@ void City::DrawRoads(const Camera3D& camera) const {
         DrawTriangle3D(aL,bR,aR,col);
     };
 
-    auto nodeInfo = [&](int x, int z, int& degree, int& dirA, int& dirB, bool& curveNode) {
-        degree = 0; dirA = -1; dirB = -1;
-        unsigned char links = roadLinks_[z][x];
-        for (int dir=0; dir<8; ++dir) {
-            if ((links & (1u<<dir)) == 0) continue;
-            if (degree == 0) dirA = dir;
-            else if (degree == 1) dirB = dir;
-            ++degree;
-        }
-        curveNode = degree == 2 && dirA >= 0 && dirB >= 0 && OppositeRoadDir(dirA) != dirB;
-    };
+    const float sidewalkHalf=CELL_SIZE*0.385f;
+    const float asphaltHalf=CELL_SIZE*0.300f;
+    Color sidewalk{171,173,169,255};
+    Color asphalt{47,52,56,255};
+    Color lane{225,219,186,190};
 
-    const float sidewalkHalf = CELL_SIZE * 0.385f;
-    const float asphaltHalf = CELL_SIZE * 0.300f;
-    const float cornerTrim = CELL_SIZE * 0.34f;
-    Color sidewalk{171, 173, 169, 255};
-    Color asphalt{47, 52, 56, 255};
-    Color lane{221, 216, 185, 180};
+    // Full edge strips overlap at their endpoints. This guarantees there are
+    // no triangular holes between neighbouring road sections.
+    for(int z=0;z<GRID_H;++z){
+        for(int x=0;x<GRID_W;++x){
+            if(!RoadAt(x,z)) continue;
 
-    // First pass: straight edge bodies, trimmed around curved degree-2 nodes.
-    for (int z=0; z<GRID_H; ++z) {
-        for (int x=0; x<GRID_W; ++x) {
-            if (!RoadAt(x,z)) continue;
+            Vector3 p=GridToWorld(x,z);
+            float cx=p.x-camera.target.x, cz=p.z-camera.target.z;
+            if(cx*cx+cz*cz>visibleSq) continue;
 
-            Vector3 p = GridToWorld(x,z);
-            float camX=p.x-camera.target.x, camZ=p.z-camera.target.z;
-            if (camX*camX+camZ*camZ > visibleSq) continue;
+            unsigned char links=roadLinks_[z][x];
+            for(int dir=0;dir<8;++dir){
+                if((links&(1u<<dir))==0) continue;
 
-            unsigned char links = roadLinks_[z][x];
-            for (int dir=0; dir<8; ++dir) {
-                if ((links & (1u<<dir)) == 0) continue;
-                int nx=x+ROAD_DIRS[dir][0], nz=z+ROAD_DIRS[dir][1];
-                if (!Inside(nx,nz)) continue;
-                if (nz < z || (nz == z && nx < x)) continue;
+                int nx=x+ROAD_DIRS[dir][0];
+                int nz=z+ROAD_DIRS[dir][1];
+                if(!Inside(nx,nz)) continue;
+                if(nz<z || (nz==z && nx<x)) continue;
 
-                Vector3 q = GridToWorld(nx,nz);
+                Vector3 q=GridToWorld(nx,nz);
                 Vector3 d{q.x-p.x,0.0f,q.z-p.z};
                 float len=sqrtf(d.x*d.x+d.z*d.z);
                 if(len<0.001f) continue;
                 d.x/=len; d.z/=len;
 
-                int dp, ap, bp, dq, aq, bq;
-                bool curveP, curveQ;
-                nodeInfo(x,z,dp,ap,bp,curveP);
-                nodeInfo(nx,nz,dq,aq,bq,curveQ);
-
-                Vector3 a=p, b=q;
-                if(curveP){ a.x += d.x*cornerTrim; a.z += d.z*cornerTrim; a.y = TerrainHeightAtWorld(a.x,a.z); }
-                if(curveQ){ b.x -= d.x*cornerTrim; b.z -= d.z*cornerTrim; b.y = TerrainHeightAtWorld(b.x,b.z); }
+                Vector3 a{p.x-d.x*0.12f,p.y,p.z-d.z*0.12f};
+                Vector3 b{q.x+d.x*0.12f,q.y,q.z+d.z*0.12f};
 
                 strip(a,b,sidewalkHalf,0.050f,sidewalk);
-                strip(a,b,asphaltHalf,0.102f,asphalt);
+                strip(a,b,asphaltHalf,0.103f,asphalt);
 
-                // One subtle centre dash per graph edge instead of the old bead pattern.
                 Vector3 l0{
-                    a.x+(b.x-a.x)*0.34f,
-                    a.y+(b.y-a.y)*0.34f,
-                    a.z+(b.z-a.z)*0.34f
+                    p.x+(q.x-p.x)*0.40f,
+                    p.y+(q.y-p.y)*0.40f,
+                    p.z+(q.z-p.z)*0.40f
                 };
                 Vector3 l1{
-                    a.x+(b.x-a.x)*0.66f,
-                    a.y+(b.y-a.y)*0.66f,
-                    a.z+(b.z-a.z)*0.66f
+                    p.x+(q.x-p.x)*0.60f,
+                    p.y+(q.y-p.y)*0.60f,
+                    p.z+(q.z-p.z)*0.60f
                 };
-                strip(l0,l1,0.014f,0.151f,lane);
+                strip(l0,l1,0.014f,0.153f,lane);
             }
         }
     }
 
-    // Second pass: actual smooth arcs at corners, and compact pads only at
-    // endpoints/intersections.
-    for (int z=0; z<GRID_H; ++z) {
-        for (int x=0; x<GRID_W; ++x) {
-            if (!RoadAt(x,z)) continue;
-            Vector3 p=GridToWorld(x,z);
+    // Only bends, endpoints and real junctions receive a filled join.
+    // Straight degree-2 nodes remain invisible.
+    for(int z=0;z<GRID_H;++z){
+        for(int x=0;x<GRID_W;++x){
+            if(!RoadAt(x,z)) continue;
 
-            int degree, dirA, dirB;
-            bool curveNode;
-            nodeInfo(x,z,degree,dirA,dirB,curveNode);
+            unsigned char links=roadLinks_[z][x];
+            int degree=0;
+            int first=-1,second=-1;
 
-            if (curveNode) {
-                Vector3 na = GridToWorld(x+ROAD_DIRS[dirA][0], z+ROAD_DIRS[dirA][1]);
-                Vector3 nb = GridToWorld(x+ROAD_DIRS[dirB][0], z+ROAD_DIRS[dirB][1]);
-
-                Vector3 da{na.x-p.x,0.0f,na.z-p.z};
-                Vector3 db{nb.x-p.x,0.0f,nb.z-p.z};
-                float la=sqrtf(da.x*da.x+da.z*da.z), lb=sqrtf(db.x*db.x+db.z*db.z);
-                if(la<0.001f||lb<0.001f) continue;
-                da.x/=la; da.z/=la; db.x/=lb; db.z/=lb;
-
-                Vector3 a{p.x+da.x*cornerTrim,0.0f,p.z+da.z*cornerTrim};
-                Vector3 b{p.x+db.x*cornerTrim,0.0f,p.z+db.z*cornerTrim};
-                a.y=TerrainHeightAtWorld(a.x,a.z);
-                b.y=TerrainHeightAtWorld(b.x,b.z);
-
-                Vector3 prev=a;
-                const int segments=9;
-                for(int s=1;s<=segments;++s){
-                    float t=(float)s/segments;
-                    float omt=1.0f-t;
-                    Vector3 cur{
-                        omt*omt*a.x + 2.0f*omt*t*p.x + t*t*b.x,
-                        0.0f,
-                        omt*omt*a.z + 2.0f*omt*t*p.z + t*t*b.z
-                    };
-                    cur.y=TerrainHeightAtWorld(cur.x,cur.z);
-                    strip(prev,cur,sidewalkHalf,0.050f,sidewalk);
-                    strip(prev,cur,asphaltHalf,0.102f,asphalt);
-                    prev=cur;
-                }
-            } else if (degree == 1) {
-                DrawCylinder({p.x,p.y+0.052f,p.z},sidewalkHalf,sidewalkHalf,0.068f,32,sidewalk);
-                DrawCylinder({p.x,p.y+0.104f,p.z},asphaltHalf,asphaltHalf,0.080f,32,asphalt);
-            } else if (degree >= 3) {
-                DrawCylinder({p.x,p.y+0.052f,p.z},sidewalkHalf*1.02f,sidewalkHalf*1.02f,0.070f,36,sidewalk);
-                DrawCylinder({p.x,p.y+0.104f,p.z},asphaltHalf*1.06f,asphaltHalf*1.06f,0.082f,36,asphalt);
+            for(int dir=0;dir<8;++dir){
+                if((links&(1u<<dir))==0) continue;
+                if(degree==0) first=dir;
+                else if(degree==1) second=dir;
+                ++degree;
             }
+
+            bool straight=(degree==2 && first>=0 && second>=0 &&
+                           OppositeRoadDir(first)==second);
+            if(straight || degree==0) continue;
+
+            Vector3 p=GridToWorld(x,z);
+            float sRadius=sidewalkHalf*(degree>=3?1.05f:1.00f);
+            float aRadius=asphaltHalf*(degree>=3?1.09f:1.02f);
+
+            DrawCylinder({p.x,p.y+0.052f,p.z},
+                         sRadius,sRadius,0.070f,36,sidewalk);
+            DrawCylinder({p.x,p.y+0.105f,p.z},
+                         aRadius,aRadius,0.084f,36,asphalt);
         }
     }
 }
@@ -1591,19 +1555,18 @@ void City::DrawTraffic(const Camera3D& camera) const {
 }
 
 void City::DrawRoadPreview() const {
-    if (tool_ != Tool::Road || !dragging_) return;
+    if(tool_!=Tool::Road || !dragging_) return;
 
-    std::vector<Vector3> curve = BuildDraggedRoadCurve();
-    if (curve.size() < 2) return;
+    std::vector<Vector3> curve=BuildDraggedRoadCurve();
+    if(curve.size()<2) return;
 
-    auto strip = [](Vector3 a, Vector3 b, float halfWidth, float lift, Color col) {
+    auto strip=[](Vector3 a,Vector3 b,float halfWidth,float lift,Color col){
         Vector3 d{b.x-a.x,0.0f,b.z-a.z};
         float len=sqrtf(d.x*d.x+d.z*d.z);
         if(len<0.001f) return;
         d.x/=len; d.z/=len;
         Vector3 side{-d.z*halfWidth,0.0f,d.x*halfWidth};
         a.y+=lift; b.y+=lift;
-
         Vector3 aL{a.x+side.x,a.y,a.z+side.z};
         Vector3 aR{a.x-side.x,a.y,a.z-side.z};
         Vector3 bL{b.x+side.x,b.y,b.z+side.z};
@@ -1614,22 +1577,34 @@ void City::DrawRoadPreview() const {
 
     bool valid=true;
     for(const auto& p:curve){
-        if(!RoadCurvePointValid(p)){ valid=false; break; }
+        if(!RoadCurvePointValid(p)){valid=false;break;}
     }
 
-    Color outer = valid ? Color{92,192,214,115} : Color{226,87,75,125};
-    Color inner = valid ? Color{72,155,174,155} : Color{181,60,53,165};
+    Color outer=valid?Color{93,195,215,122}:Color{229,91,77,132};
+    Color inner=valid?Color{60,137,156,176}:Color{176,55,48,184};
+    float outerHalf=CELL_SIZE*0.385f;
+    float innerHalf=CELL_SIZE*0.295f;
 
     for(size_t i=0;i+1<curve.size();++i){
-        Vector3 a=curve[i], b=curve[i+1];
-        strip(a,b,CELL_SIZE*0.39f,0.115f,outer);
-        strip(a,b,CELL_SIZE*0.29f,0.125f,inner);
+        strip(curve[i],curve[i+1],outerHalf,0.116f,outer);
+        strip(curve[i],curve[i+1],innerHalf,0.128f,inner);
     }
 
-    Vector3 start=curve.front();
-    Vector3 end=curve.back();
-    DrawCylinder({start.x,start.y+0.14f,start.z},0.17f,0.17f,0.05f,20,Color{211,240,246,210});
-    DrawCylinder({end.x,end.y+0.14f,end.z},0.17f,0.17f,0.05f,20,valid?Color{211,240,246,210}:Color{247,132,117,220});
+    // Fill the joins in the live preview as well.
+    for(size_t i=0;i<curve.size();i+=2){
+        const Vector3& p=curve[i];
+        DrawCylinder({p.x,p.y+0.118f,p.z},
+                     outerHalf,outerHalf,0.018f,24,outer);
+        DrawCylinder({p.x,p.y+0.130f,p.z},
+                     innerHalf,innerHalf,0.020f,24,inner);
+    }
+
+    const Vector3& start=curve.front();
+    const Vector3& end=curve.back();
+    DrawCylinder({start.x,start.y+0.16f,start.z},0.15f,0.15f,0.045f,20,
+                 Color{222,245,249,225});
+    DrawCylinder({end.x,end.y+0.16f,end.z},0.15f,0.15f,0.045f,20,
+                 valid?Color{222,245,249,225}:Color{247,132,117,230});
 }
 
 void City::DrawPlacementPreview() const {
@@ -1688,7 +1663,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.10", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.11", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});

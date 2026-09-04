@@ -38,7 +38,8 @@ if(EMSCRIPTEN)
   target_link_options(CitiesSkylineCpp PRIVATE
     "-sUSE_GLFW=3"
     "-sALLOW_MEMORY_GROWTH=1"
-    "-sEXPORTED_RUNTIME_METHODS=[]"
+    "-sEXPORTED_FUNCTIONS=[\"_main\",\"_CitySetTool\",\"_CitySetSpeed\",\"_CityMoney\",\"_CityPopulation\",\"_CityFilledJobs\",\"_CityTotalJobs\",\"_CityNetMonthly\",\"_CityPowerUsed\",\"_CityPowerCapacity\",\"_CityWaterUsed\",\"_CityWaterCapacity\",\"_CityHappiness\",\"_CityResidentialDemand\",\"_CityCommercialDemand\",\"_CityIndustrialDemand\",\"_CityLevel\",\"_CityScore\",\"_CityMilestoneTarget\",\"_CitySpeed\",\"_CitySelectedTool\",\"_CityVehicleCount\",\"_CityDay\",\"_CityMonth\",\"_CityYear\"]"
+    "-sEXPORTED_RUNTIME_METHODS=[\"ccall\"]"
     "--shell-file" "${CMAKE_SOURCE_DIR}/web/shell.html"
   )
 endif()

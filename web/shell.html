@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>City Lab v0.10</title>
+<title>City Lab v0.11</title>
 <style>
 :root{
   --hud:#18242b;
@@ -59,11 +59,11 @@ button{font:inherit}
 </head>
 <body>
 <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
-<div id="status">City Lab v0.10 wird geladen…</div>
+<div id="status">City Lab v0.11 wird geladen…</div>
 
 <div id="hud">
   <div id="top">
-    <div class="brand">CITY LAB</div><div class="ver">v0.10</div>
+    <div class="brand">CITY LAB</div><div class="ver">v0.11</div>
     <div class="topStat"><b id="level">STUFE 1</b><span>Stadt</span></div>
     <div class="topStat"><b id="score">50</b><span>Score</span></div>
     <div class="topStat"><b id="traffic">0</b><span>Verkehr</span></div>
@@ -149,37 +149,100 @@ button{font:inherit}
 <script>
 const canvas=document.getElementById("canvas");
 const statusEl=document.getElementById("status");
-function chf(n){const s=n<0?"-":"";return s+"CHF "+Math.abs(n).toLocaleString("de-CH")}
-function call(name,...args){const fn=Module["_"+name];return typeof fn==="function"?fn(...args):0}
-function refreshHUD(){
-  if(!Module.calledRun)return;
-  const pop=call("CityPopulation"),target=call("CityMilestoneTarget");
-  const net=call("CityNetMonthly"),tool=call("CitySelectedTool"),speed=call("CitySpeed");
-  document.getElementById("money").textContent=chf(call("CityMoney"));
-  document.getElementById("population").textContent=pop.toLocaleString("de-CH");
-  document.getElementById("jobs").textContent=call("CityFilledJobs")+" / "+call("CityTotalJobs");
-  const ne=document.getElementById("net");ne.textContent=(net>=0?"+":"")+net.toLocaleString("de-CH");ne.style.color=net>=0?"var(--green)":"var(--red)";
-  document.getElementById("power").textContent=call("CityPowerUsed")+" / "+call("CityPowerCapacity");
-  document.getElementById("water").textContent=call("CityWaterUsed")+" / "+call("CityWaterCapacity");
-  document.getElementById("happy").textContent=call("CityHappiness")+"%";
-  document.getElementById("rd").style.width=call("CityResidentialDemand")+"%";
-  document.getElementById("cd").style.width=call("CityCommercialDemand")+"%";
-  document.getElementById("id").style.width=call("CityIndustrialDemand")+"%";
-  document.getElementById("level").textContent="STUFE "+call("CityLevel");
-  document.getElementById("score").textContent=call("CityScore");
-  document.getElementById("traffic").textContent=call("CityVehicleCount");
-  document.getElementById("date").textContent=call("CityDay")+"."+call("CityMonth")+"."+call("CityYear");
-  document.getElementById("objectiveText").textContent=target>900000?"MAX":pop.toLocaleString("de-CH")+" / "+target.toLocaleString("de-CH");
-  document.getElementById("objectiveFill").style.width=target>900000?"100%":Math.min(100,pop/Math.max(1,target)*100)+"%";
-  document.querySelectorAll(".tool").forEach(e=>e.classList.toggle("active",+e.dataset.tool===tool));
-  document.querySelectorAll(".speed").forEach(e=>e.classList.toggle("active",+e.dataset.speed===speed));
+let runtimeReady=false;
+
+function chf(n){
+  const sign=n<0?"-":"";
+  return sign+"CHF "+Math.abs(n).toLocaleString("de-CH");
 }
-document.querySelectorAll(".tool").forEach(btn=>btn.addEventListener("click",e=>{e.stopPropagation();call("CitySetTool",+btn.dataset.tool);refreshHUD();canvas.focus()}));
-document.querySelectorAll(".speed").forEach(btn=>btn.addEventListener("click",e=>{e.stopPropagation();call("CitySetSpeed",+btn.dataset.speed);refreshHUD();canvas.focus()}));
+function bridge(name,returnType="number",argTypes=[],args=[]){
+  if(!runtimeReady || typeof Module.ccall!=="function") return 0;
+  try{
+    return Module.ccall(name,returnType,argTypes,args);
+  }catch(err){
+    console.error("City Lab bridge error:",name,err);
+    return 0;
+  }
+}
+function getv(name){return bridge(name,"number",[],[])}
+
+function refreshHUD(){
+  if(!runtimeReady)return;
+
+  const pop=getv("CityPopulation");
+  const target=getv("CityMilestoneTarget");
+  const net=getv("CityNetMonthly");
+  const tool=getv("CitySelectedTool");
+  const speed=getv("CitySpeed");
+
+  document.getElementById("money").textContent=chf(getv("CityMoney"));
+  document.getElementById("population").textContent=pop.toLocaleString("de-CH");
+  document.getElementById("jobs").textContent=getv("CityFilledJobs")+" / "+getv("CityTotalJobs");
+
+  const netEl=document.getElementById("net");
+  netEl.textContent=(net>=0?"+":"")+net.toLocaleString("de-CH");
+  netEl.style.color=net>=0?"var(--green)":"var(--red)";
+
+  document.getElementById("power").textContent=getv("CityPowerUsed")+" / "+getv("CityPowerCapacity");
+  document.getElementById("water").textContent=getv("CityWaterUsed")+" / "+getv("CityWaterCapacity");
+  document.getElementById("happy").textContent=getv("CityHappiness")+"%";
+  document.getElementById("rd").style.width=getv("CityResidentialDemand")+"%";
+  document.getElementById("cd").style.width=getv("CityCommercialDemand")+"%";
+  document.getElementById("id").style.width=getv("CityIndustrialDemand")+"%";
+  document.getElementById("level").textContent="STUFE "+getv("CityLevel");
+  document.getElementById("score").textContent=getv("CityScore");
+  document.getElementById("traffic").textContent=getv("CityVehicleCount");
+  document.getElementById("date").textContent=getv("CityDay")+"."+getv("CityMonth")+"."+getv("CityYear");
+  document.getElementById("objectiveText").textContent=
+    target>900000?"MAX":pop.toLocaleString("de-CH")+" / "+target.toLocaleString("de-CH");
+  document.getElementById("objectiveFill").style.width=
+    target>900000?"100%":Math.min(100,pop/Math.max(1,target)*100)+"%";
+
+  document.querySelectorAll(".tool").forEach(el=>
+    el.classList.toggle("active",Number(el.dataset.tool)===tool));
+  document.querySelectorAll(".speed").forEach(el=>
+    el.classList.toggle("active",Number(el.dataset.speed)===speed));
+}
+
+document.querySelectorAll(".tool").forEach(btn=>{
+  btn.addEventListener("click",e=>{
+    e.preventDefault();
+    e.stopPropagation();
+    const value=Number(btn.dataset.tool);
+    bridge("CitySetTool",null,["number"],[value]);
+    document.querySelectorAll(".tool").forEach(el=>
+      el.classList.toggle("active",Number(el.dataset.tool)===value));
+    setTimeout(refreshHUD,25);
+    canvas.focus();
+  });
+});
+
+document.querySelectorAll(".speed").forEach(btn=>{
+  btn.addEventListener("click",e=>{
+    e.preventDefault();
+    e.stopPropagation();
+    const value=Number(btn.dataset.speed);
+    bridge("CitySetSpeed",null,["number"],[value]);
+    document.querySelectorAll(".speed").forEach(el=>
+      el.classList.toggle("active",Number(el.dataset.speed)===value));
+    setTimeout(refreshHUD,25);
+    canvas.focus();
+  });
+});
+
 var Module={
   canvas,
-  setStatus:t=>{if(!statusEl)return;if(t)statusEl.textContent=t;else statusEl.remove()},
-  onRuntimeInitialized:()=>{setInterval(refreshHUD,180);refreshHUD();canvas.focus()}
+  setStatus:t=>{
+    if(!statusEl)return;
+    if(t)statusEl.textContent=t;
+    else statusEl.remove();
+  },
+  onRuntimeInitialized:()=>{
+    runtimeReady=true;
+    refreshHUD();
+    setInterval(refreshHUD,150);
+    canvas.focus();
+  }
 };
 window.addEventListener("load",()=>canvas.focus());
 </script>
