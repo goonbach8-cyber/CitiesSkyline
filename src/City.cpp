@@ -1976,8 +1976,6 @@ void City::DrawTraffic(const Camera3D& camera) const {
 }
 
 void City::DrawRoadPreview() const {
-
-void City::DrawRoadPreview() const {
     if (tool_ != Tool::Road || !dragging_) return;
 
     std::vector<Vector3> curve = BuildDraggedRoadCurve();
