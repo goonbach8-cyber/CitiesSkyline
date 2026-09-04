@@ -57,14 +57,12 @@ private:
     };
 
     struct Vehicle {
-        int x = 0;
-        int z = 0;
-        int nextX = 0;
-        int nextZ = 0;
-        int prevX = -1;
-        int prevZ = -1;
+        int pathIndex = -1;
+        int segmentIndex = 0;
+        int direction = 1;
         float t = 0.0f;
-        float speed = 0.70f;
+        float speed = 4.2f; // world units per second
+        float laneOffset = 0.16f;
         Color color{190, 70, 65, 255};
     };
 
@@ -128,7 +126,6 @@ private:
     void CheckMilestones();
     void UpdateTraffic(float dt);
     void SpawnVehicle();
-    bool PickNextRoadCell(Vehicle& vehicle);
 
     void BuildTerrainCache();
     void BuildTerrainModels();

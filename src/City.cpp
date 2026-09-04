@@ -42,6 +42,36 @@ int RoadDirIndex(int dx, int dz) {
 int OppositeRoadDir(int dir) {
     return (dir + 4) & 7;
 }
+
+bool SegmentIntersectionXZ(
+    Vector3 a, Vector3 b,
+    Vector3 c, Vector3 d,
+    float& ta, float& tb,
+    Vector3& hit
+) {
+    float rX = b.x - a.x;
+    float rZ = b.z - a.z;
+    float sX = d.x - c.x;
+    float sZ = d.z - c.z;
+
+    float denom = rX * sZ - rZ * sX;
+    if (fabsf(denom) < 0.00001f) return false;
+
+    float qpx = c.x - a.x;
+    float qpz = c.z - a.z;
+
+    ta = (qpx * sZ - qpz * sX) / denom;
+    tb = (qpx * rZ - qpz * rX) / denom;
+
+    if (ta < 0.0f || ta > 1.0f || tb < 0.0f || tb > 1.0f) return false;
+
+    hit = {
+        a.x + rX * ta,
+        0.0f,
+        a.z + rZ * ta
+    };
+    return true;
+}
 }
 
 City::City() {
@@ -758,6 +788,60 @@ void City::PlaceDraggedRoad() {
     std::vector<Vector3> curve = BuildDraggedRoadCurve();
     if (curve.size() < 2) return;
 
+    // If the new road crosses an existing visible road, stop at the first hit.
+    // This creates a stable T-junction instead of two unrelated ribbons crossing.
+    float bestDistanceAlong = 1.0e30f;
+    size_t bestSegment = curve.size();
+    float bestT = 0.0f;
+    Vector3 bestHit{};
+    float travelled = 0.0f;
+
+    for (size_t i = 0; i + 1 < curve.size(); ++i) {
+        Vector3 a = curve[i];
+        Vector3 b = curve[i + 1];
+        float segDx = b.x - a.x;
+        float segDz = b.z - a.z;
+        float segLen = sqrtf(segDx * segDx + segDz * segDz);
+
+        for (const auto& path : roadVisualPaths_) {
+            if (path.points.size() < 2) continue;
+
+            for (size_t j = 0; j + 1 < path.points.size(); ++j) {
+                float ta = 0.0f, tb = 0.0f;
+                Vector3 hit{};
+                if (!SegmentIntersectionXZ(a, b, path.points[j], path.points[j + 1], ta, tb, hit)) continue;
+
+                // Ignore a hit extremely close to the starting point; that is
+                // the normal case when extending an existing road.
+                float along = travelled + segLen * ta;
+                if (along < CELL_SIZE * 0.45f) continue;
+
+                if (along < bestDistanceAlong) {
+                    bestDistanceAlong = along;
+                    bestSegment = i;
+                    bestT = ta;
+                    bestHit = hit;
+                }
+            }
+        }
+
+        travelled += segLen;
+    }
+
+    if (bestSegment < curve.size()) {
+        std::vector<Vector3> clipped;
+        clipped.reserve(bestSegment + 2);
+        for (size_t i = 0; i <= bestSegment; ++i) clipped.push_back(curve[i]);
+
+        bestHit.y = TerrainHeightAtWorld(bestHit.x, bestHit.z);
+        if (clipped.empty() ||
+            fabsf(clipped.back().x - bestHit.x) > 0.01f ||
+            fabsf(clipped.back().z - bestHit.z) > 0.01f) {
+            clipped.push_back(bestHit);
+        }
+        curve.swap(clipped);
+    }
+
     int prevX = -1;
     int prevZ = -1;
     bool havePrev = false;
@@ -830,8 +914,6 @@ void City::PlaceDraggedRoad() {
         visual.points.push_back(p);
     }
 
-    // Keep the original smoothed mouse gesture for rendering. The old graph
-    // remains underneath for zoning, services and traffic.
     if (visual.points.size() >= 2) {
         roadVisualPaths_.push_back(std::move(visual));
     }
@@ -914,7 +996,7 @@ void City::PlaceService(ServiceKind kind, int x, int z) {
 }
 
 void City::SpawnVehicle() {
-    if (roadCount_ < 2) return;
+    if (roadVisualPaths_.empty()) return;
 
     static const Color carColors[] = {
         {195, 67, 62, 255}, {63, 112, 165, 255}, {220, 205, 177, 255},
@@ -922,94 +1004,113 @@ void City::SpawnVehicle() {
         {165, 168, 171, 255}, {125, 86, 145, 255}
     };
 
-    for (int attempt = 0; attempt < 90; ++attempt) {
-        int x = GetRandomValue(0, GRID_W - 1);
-        int z = GetRandomValue(0, GRID_H - 1);
-        if (!RoadAt(x, z)) continue;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        int pathIndex = GetRandomValue(0, (int)roadVisualPaths_.size() - 1);
+        const auto& path = roadVisualPaths_[pathIndex];
+        if (path.points.size() < 2) continue;
 
         Vehicle v;
-        v.x = x;
-        v.z = z;
-        v.speed = 0.58f + GetRandomValue(0, 42) / 100.0f;
+        v.pathIndex = pathIndex;
+        v.direction = GetRandomValue(0, 1) == 0 ? 1 : -1;
+        v.segmentIndex = v.direction > 0 ? 0 : (int)path.points.size() - 2;
+        v.t = v.direction > 0 ? 0.0f : 1.0f;
+        v.speed = 3.0f + GetRandomValue(0, 220) / 100.0f;
+        v.laneOffset = v.direction > 0 ? 0.16f : -0.16f;
         v.color = carColors[GetRandomValue(0, 7)];
 
-        if (!PickNextRoadCell(v)) continue;
         vehicles_.push_back(v);
         return;
     }
 }
 
-bool City::PickNextRoadCell(Vehicle& v) {
-    int candidates[8][2];
-    int count = 0;
-
-    for (int dir = 0; dir < 8; ++dir) {
-        if ((roadLinks_[v.z][v.x] & (1u << dir)) == 0) continue;
-        int nx = v.x + ROAD_DIRS[dir][0];
-        int nz = v.z + ROAD_DIRS[dir][1];
-
-        if (nx == v.prevX && nz == v.prevZ) continue;
-        candidates[count][0] = nx;
-        candidates[count][1] = nz;
-        ++count;
-    }
-
-    if (count == 0 && v.prevX >= 0 && RoadConnected(v.x, v.z, v.prevX, v.prevZ)) {
-        v.nextX = v.prevX;
-        v.nextZ = v.prevZ;
-        return true;
-    }
-    if (count == 0) return false;
-
-    int pick = GetRandomValue(0, count - 1);
-    v.nextX = candidates[pick][0];
-    v.nextZ = candidates[pick][1];
-    return true;
-}
-
 void City::UpdateTraffic(float dt) {
-    float multiplier = gameSpeed_ == 0 ? 0.0f : (gameSpeed_ == 1 ? 1.0f : (gameSpeed_ == 2 ? 1.65f : 2.30f));
+    float multiplier = gameSpeed_ == 0 ? 0.0f :
+        (gameSpeed_ == 1 ? 1.0f : (gameSpeed_ == 2 ? 1.65f : 2.30f));
     if (multiplier <= 0.0f) return;
 
-    int desired = std::min(52, std::max(0, roadCount_ / 3 + population_ / 42));
-    trafficSpawnTimer_ += dt * multiplier;
+    int desired = std::min(
+        48,
+        std::max(0, (int)roadVisualPaths_.size() * 2 + population_ / 55)
+    );
 
-    while ((int)vehicles_.size() < desired && trafficSpawnTimer_ > 0.22f) {
-        trafficSpawnTimer_ -= 0.22f;
+    trafficSpawnTimer_ += dt * multiplier;
+    while ((int)vehicles_.size() < desired && trafficSpawnTimer_ > 0.30f) {
+        trafficSpawnTimer_ -= 0.30f;
         SpawnVehicle();
     }
 
-    if ((int)vehicles_.size() > desired + 8) {
-        vehicles_.resize((size_t)(desired + 8));
+    while ((int)vehicles_.size() > desired + 6) {
+        vehicles_.pop_back();
     }
 
     for (size_t i = 0; i < vehicles_.size();) {
         Vehicle& v = vehicles_[i];
 
-        if (!RoadAt(v.x, v.z) || !RoadAt(v.nextX, v.nextZ)) {
+        if (v.pathIndex < 0 || v.pathIndex >= (int)roadVisualPaths_.size()) {
             vehicles_.erase(vehicles_.begin() + (long)i);
             continue;
         }
 
-        v.t += dt * multiplier * v.speed;
-        while (v.t >= 1.0f) {
-            v.t -= 1.0f;
-            v.prevX = v.x;
-            v.prevZ = v.z;
-            v.x = v.nextX;
-            v.z = v.nextZ;
-            ++completedTrips_;
+        const auto& path = roadVisualPaths_[v.pathIndex];
+        if (path.points.size() < 2) {
+            vehicles_.erase(vehicles_.begin() + (long)i);
+            continue;
+        }
 
-            if (!PickNextRoadCell(v)) {
-                vehicles_.erase(vehicles_.begin() + (long)i);
-                goto next_vehicle;
+        v.segmentIndex = std::max(0, std::min(v.segmentIndex, (int)path.points.size() - 2));
+
+        float remainingMove = v.speed * dt * multiplier;
+        while (remainingMove > 0.0f) {
+            const Vector3& a = path.points[v.segmentIndex];
+            const Vector3& b = path.points[v.segmentIndex + 1];
+
+            float dx = b.x - a.x;
+            float dz = b.z - a.z;
+            float segLen = sqrtf(dx * dx + dz * dz);
+            if (segLen < 0.001f) segLen = 0.001f;
+
+            float toEnd = v.direction > 0
+                ? (1.0f - v.t) * segLen
+                : v.t * segLen;
+
+            if (remainingMove < toEnd) {
+                float deltaT = remainingMove / segLen;
+                v.t += v.direction > 0 ? deltaT : -deltaT;
+                remainingMove = 0.0f;
+            } else {
+                remainingMove -= toEnd;
+
+                if (v.direction > 0) {
+                    if (v.segmentIndex + 1 >= (int)path.points.size() - 1) {
+                        // Turn around at the end. This keeps every car on a
+                        // real visible road until junction routing is added.
+                        v.direction = -1;
+                        v.laneOffset = -0.16f;
+                        v.t = 1.0f;
+                    } else {
+                        ++v.segmentIndex;
+                        v.t = 0.0f;
+                    }
+                } else {
+                    if (v.segmentIndex <= 0) {
+                        v.direction = 1;
+                        v.laneOffset = 0.16f;
+                        v.t = 0.0f;
+                    } else {
+                        --v.segmentIndex;
+                        v.t = 1.0f;
+                    }
+                }
+
+                ++completedTrips_;
             }
         }
 
         ++i;
-        next_vehicle:;
     }
 }
+
+void City::Simulate(float dt) {
 
 void City::Simulate(float dt) {
     if (gameSpeed_ <= 0) return;
@@ -1821,33 +1922,62 @@ void City::DrawTraffic(const Camera3D& camera) const {
     float visibleSq = visibleRadius * visibleRadius;
 
     for (const auto& v : vehicles_) {
-        Vector3 a=GridToWorld(v.x,v.z);
-        Vector3 b=GridToWorld(v.nextX,v.nextZ);
+        if (v.pathIndex < 0 || v.pathIndex >= (int)roadVisualPaths_.size()) continue;
+        const auto& path = roadVisualPaths_[v.pathIndex];
+        if (path.points.size() < 2) continue;
+
+        int seg = std::max(0, std::min(v.segmentIndex, (int)path.points.size() - 2));
+        const Vector3& a = path.points[seg];
+        const Vector3& b = path.points[seg + 1];
+
         Vector3 pos{
-            a.x+(b.x-a.x)*v.t,
-            a.y+(b.y-a.y)*v.t+0.22f,
-            a.z+(b.z-a.z)*v.t
+            a.x + (b.x - a.x) * v.t,
+            a.y + (b.y - a.y) * v.t + 0.22f,
+            a.z + (b.z - a.z) * v.t
         };
 
-        float dx=pos.x-camera.target.x, dz=pos.z-camera.target.z;
-        if(dx*dx+dz*dz>visibleSq) continue;
+        float dx = pos.x - camera.target.x;
+        float dz = pos.z - camera.target.z;
+        if (dx * dx + dz * dz > visibleSq) continue;
 
-        Vector3 dir{b.x-a.x,0.0f,b.z-a.z};
-        float len=sqrtf(dir.x*dir.x+dir.z*dir.z);
-        if(len<0.001f) continue;
-        dir.x/=len; dir.z/=len;
+        Vector3 dir{b.x - a.x, 0.0f, b.z - a.z};
+        if (v.direction < 0) {
+            dir.x = -dir.x;
+            dir.z = -dir.z;
+        }
 
-        // Two-way lane offset.
-        Vector3 perp{-dir.z,0.0f,dir.x};
-        pos.x += perp.x*0.15f;
-        pos.z += perp.z*0.15f;
+        float len = sqrtf(dir.x * dir.x + dir.z * dir.z);
+        if (len < 0.001f) continue;
+        dir.x /= len;
+        dir.z /= len;
 
-        Vector3 front{pos.x+dir.x*0.23f,pos.y,pos.z+dir.z*0.23f};
-        Vector3 rear {pos.x-dir.x*0.23f,pos.y,pos.z-dir.z*0.23f};
-        DrawCylinderEx(rear,front,0.13f,0.13f,8,v.color);
-        DrawSphereEx({pos.x,pos.y+0.10f,pos.z},0.105f,3,7,Color{113,153,170,255});
+        Vector3 perp{-dir.z, 0.0f, dir.x};
+        pos.x += perp.x * fabsf(v.laneOffset);
+        pos.z += perp.z * fabsf(v.laneOffset);
+
+        Vector3 front{
+            pos.x + dir.x * 0.23f,
+            pos.y,
+            pos.z + dir.z * 0.23f
+        };
+        Vector3 rear{
+            pos.x - dir.x * 0.23f,
+            pos.y,
+            pos.z - dir.z * 0.23f
+        };
+
+        DrawCylinderEx(rear, front, 0.13f, 0.13f, 8, v.color);
+        DrawSphereEx(
+            {pos.x, pos.y + 0.10f, pos.z},
+            0.105f,
+            3,
+            7,
+            Color{113, 153, 170, 255}
+        );
     }
 }
+
+void City::DrawRoadPreview() const {
 
 void City::DrawRoadPreview() const {
     if (tool_ != Tool::Road || !dragging_) return;
@@ -1978,7 +2108,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.15", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.16", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});
