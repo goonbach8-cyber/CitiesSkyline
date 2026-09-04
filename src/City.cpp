@@ -293,6 +293,7 @@ void City::SetTool(Tool tool) {
 void City::Update(float dt, const Camera3D& camera) {
     HandleInput(camera);
     Simulate(dt);
+    UpdateTraffic(dt);
 }
 
 void City::HandleUIInput() {
@@ -387,24 +388,31 @@ void City::HandleInput(const Camera3D& camera) {
 void City::PlaceRoadLine(int x0, int z0, int x1, int z1) {
     auto place = [&](int x, int z) {
         if (!Inside(x, z) || RoadAt(x, z) || IsWater(x, z) || money_ < 120) return;
-        int bi = BuildingIndexAt(x, z);
-        int si = ServiceIndexAt(x, z);
-        if (bi >= 0 || si >= 0) return;
+        if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) return;
         roads_[z][x] = true;
         zones_[z][x] = Zone::None;
         money_ -= 120;
         ++roadCount_;
     };
 
-    int dx = abs(x1 - x0);
-    int dz = abs(z1 - z0);
-    if (dx >= dz) {
-        int a = std::min(x0, x1), b = std::max(x0, x1);
-        for (int x = a; x <= b; ++x) place(x, z0);
-    } else {
-        int a = std::min(z0, z1), b = std::max(z0, z1);
-        for (int z = a; z <= b; ++z) place(x0, z);
+    // Bresenham line: unlike the old axis-locked tool this supports arbitrary
+    // angles, which immediately makes layouts feel less like a spreadsheet.
+    int x = x0;
+    int z = z0;
+    int dx = std::abs(x1 - x0);
+    int dz = std::abs(z1 - z0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sz = z0 < z1 ? 1 : -1;
+    int err = dx - dz;
+
+    while (true) {
+        place(x, z);
+        if (x == x1 && z == z1) break;
+        int e2 = err * 2;
+        if (e2 > -dz) { err -= dz; x += sx; }
+        if (e2 <  dx) { err += dx; z += sz; }
     }
+
     RecalculateBudgetPreview();
 }
 
@@ -476,6 +484,109 @@ void City::PlaceService(ServiceKind kind, int x, int z) {
     services_.push_back(s);
     UpdateServices();
     RecalculateBudgetPreview();
+}
+
+void City::SpawnVehicle() {
+    if (roadCount_ < 2) return;
+
+    static const Color carColors[] = {
+        {195, 67, 62, 255}, {63, 112, 165, 255}, {220, 205, 177, 255},
+        {55, 61, 64, 255}, {204, 145, 55, 255}, {89, 139, 104, 255},
+        {165, 168, 171, 255}, {125, 86, 145, 255}
+    };
+
+    for (int attempt = 0; attempt < 90; ++attempt) {
+        int x = GetRandomValue(0, GRID_W - 1);
+        int z = GetRandomValue(0, GRID_H - 1);
+        if (!RoadAt(x, z)) continue;
+
+        Vehicle v;
+        v.x = x;
+        v.z = z;
+        v.speed = 0.58f + GetRandomValue(0, 42) / 100.0f;
+        v.color = carColors[GetRandomValue(0, 7)];
+
+        if (!PickNextRoadCell(v)) continue;
+        vehicles_.push_back(v);
+        return;
+    }
+}
+
+bool City::PickNextRoadCell(Vehicle& v) {
+    int candidates[8][2];
+    int count = 0;
+    const int dirs[8][2] = {
+        {1,0},{-1,0},{0,1},{0,-1},
+        {1,1},{1,-1},{-1,1},{-1,-1}
+    };
+
+    for (const auto& d : dirs) {
+        int nx = v.x + d[0];
+        int nz = v.z + d[1];
+        if (!RoadAt(nx, nz)) continue;
+
+        // Prefer continuing forward instead of immediately making a U-turn.
+        if (nx == v.prevX && nz == v.prevZ) continue;
+        candidates[count][0] = nx;
+        candidates[count][1] = nz;
+        ++count;
+    }
+
+    if (count == 0 && v.prevX >= 0 && RoadAt(v.prevX, v.prevZ)) {
+        v.nextX = v.prevX;
+        v.nextZ = v.prevZ;
+        return true;
+    }
+    if (count == 0) return false;
+
+    int pick = GetRandomValue(0, count - 1);
+    v.nextX = candidates[pick][0];
+    v.nextZ = candidates[pick][1];
+    return true;
+}
+
+void City::UpdateTraffic(float dt) {
+    float multiplier = gameSpeed_ == 0 ? 0.0f : (gameSpeed_ == 1 ? 1.0f : (gameSpeed_ == 2 ? 1.65f : 2.30f));
+    if (multiplier <= 0.0f) return;
+
+    int desired = std::min(52, std::max(0, roadCount_ / 3 + population_ / 42));
+    trafficSpawnTimer_ += dt * multiplier;
+
+    while ((int)vehicles_.size() < desired && trafficSpawnTimer_ > 0.22f) {
+        trafficSpawnTimer_ -= 0.22f;
+        SpawnVehicle();
+    }
+
+    if ((int)vehicles_.size() > desired + 8) {
+        vehicles_.resize((size_t)(desired + 8));
+    }
+
+    for (size_t i = 0; i < vehicles_.size();) {
+        Vehicle& v = vehicles_[i];
+
+        if (!RoadAt(v.x, v.z) || !RoadAt(v.nextX, v.nextZ)) {
+            vehicles_.erase(vehicles_.begin() + (long)i);
+            continue;
+        }
+
+        v.t += dt * multiplier * v.speed;
+        while (v.t >= 1.0f) {
+            v.t -= 1.0f;
+            v.prevX = v.x;
+            v.prevZ = v.z;
+            v.x = v.nextX;
+            v.z = v.nextZ;
+            ++completedTrips_;
+
+            if (!PickNextRoadCell(v)) {
+                vehicles_.erase(vehicles_.begin() + (long)i);
+                goto next_vehicle;
+            }
+        }
+
+        ++i;
+        next_vehicle:;
+    }
 }
 
 void City::Simulate(float dt) {
@@ -800,91 +911,94 @@ void City::GenerateNaturalProps() {
     }
 }
 
-Model City::BuildCellSurfaceModel(bool waterCells) const {
-    int cellCount = 0;
-    for (int z = 0; z < GRID_H; ++z) {
-        for (int x = 0; x < GRID_W; ++x) {
-            if (IsWater(x, z) == waterCells) ++cellCount;
+Model City::BuildCellSurfaceModel(bool waterSurface) const {
+    Mesh mesh{};
+
+    if (waterSurface) {
+        mesh.triangleCount = 2;
+        mesh.vertexCount = 6;
+        mesh.vertices = (float*)MemAlloc((size_t)mesh.vertexCount * 3 * sizeof(float));
+        mesh.colors = (unsigned char*)MemAlloc((size_t)mesh.vertexCount * 4 * sizeof(unsigned char));
+
+        const float halfW = GRID_W * CELL_SIZE * 0.5f;
+        const float halfH = GRID_H * CELL_SIZE * 0.5f;
+        const float y = WATER_LEVEL - 0.020f;
+        Vector3 v[6] = {
+            {-halfW,y,-halfH}, { halfW,y, halfH}, { halfW,y,-halfH},
+            {-halfW,y,-halfH}, {-halfW,y, halfH}, { halfW,y, halfH}
+        };
+        Color water{48, 121, 164, 242};
+        for (int i = 0; i < 6; ++i) {
+            mesh.vertices[i*3] = v[i].x;
+            mesh.vertices[i*3+1] = v[i].y;
+            mesh.vertices[i*3+2] = v[i].z;
+            mesh.colors[i*4] = water.r;
+            mesh.colors[i*4+1] = water.g;
+            mesh.colors[i*4+2] = water.b;
+            mesh.colors[i*4+3] = water.a;
         }
+
+        UploadMesh(&mesh, false);
+        return LoadModelFromMesh(mesh);
     }
 
-    Mesh mesh{};
+    const int cellCount = GRID_W * GRID_H;
     mesh.triangleCount = cellCount * 2;
     mesh.vertexCount = cellCount * 6;
     mesh.vertices = (float*)MemAlloc((size_t)mesh.vertexCount * 3 * sizeof(float));
     mesh.colors = (unsigned char*)MemAlloc((size_t)mesh.vertexCount * 4 * sizeof(unsigned char));
 
     int vi = 0;
-    auto pushVertex = [&](float vx, float vy, float vz, Color col) {
-        int vb = vi * 3;
-        mesh.vertices[vb] = vx; mesh.vertices[vb + 1] = vy; mesh.vertices[vb + 2] = vz;
-        int cb = vi * 4;
-        mesh.colors[cb] = col.r; mesh.colors[cb + 1] = col.g;
-        mesh.colors[cb + 2] = col.b; mesh.colors[cb + 3] = col.a;
+    auto colorAt = [&](float y, int cx, int cz) {
+        float n = Hash01(cx, cz, 177) - 0.5f;
+        if (y < WATER_LEVEL + 0.12f) {
+            return Color{(unsigned char)Clamp(166.0f + n*8.0f,0.0f,255.0f),
+                         (unsigned char)Clamp(157.0f + n*7.0f,0.0f,255.0f),
+                         (unsigned char)Clamp(112.0f + n*5.0f,0.0f,255.0f),255};
+        }
+        if (y > 1.88f) {
+            return Color{(unsigned char)Clamp(102.0f+n*8.0f,0.0f,255.0f),
+                         (unsigned char)Clamp(119.0f+n*8.0f,0.0f,255.0f),
+                         (unsigned char)Clamp(94.0f+n*6.0f,0.0f,255.0f),255};
+        }
+        float shade = Clamp((y - WATER_LEVEL) / 1.8f, 0.0f, 1.0f);
+        return Color{
+            (unsigned char)Clamp(73.0f + shade*16.0f + n*5.0f,0.0f,255.0f),
+            (unsigned char)Clamp(127.0f + shade*24.0f + n*5.0f,0.0f,255.0f),
+            (unsigned char)Clamp(76.0f + shade*13.0f + n*4.0f,0.0f,255.0f),255};
+    };
+    auto push = [&](float x,float y,float z,Color col) {
+        mesh.vertices[vi*3]=x; mesh.vertices[vi*3+1]=y; mesh.vertices[vi*3+2]=z;
+        mesh.colors[vi*4]=col.r; mesh.colors[vi*4+1]=col.g;
+        mesh.colors[vi*4+2]=col.b; mesh.colors[vi*4+3]=col.a;
         ++vi;
     };
-
     auto cornerHeight = [&](int cx, int cz) {
-        float sum = 0.0f;
-        int count = 0;
-        for (int dz = -1; dz <= 0; ++dz) {
-            for (int dx = -1; dx <= 0; ++dx) {
-                int sx = cx + dx;
-                int sz = cz + dz;
-                if (Inside(sx, sz)) {
-                    sum += TerrainHeight(sx, sz);
-                    ++count;
-                }
-            }
+        float sum=0.0f; int count=0;
+        for(int dz=-1; dz<=0; ++dz) for(int dx=-1; dx<=0; ++dx) {
+            int sx=cx+dx, sz=cz+dz;
+            if(Inside(sx,sz)){ sum+=TerrainHeight(sx,sz); ++count; }
         }
-        return count > 0 ? sum / count : 0.0f;
+        return count ? sum/count : 0.0f;
     };
 
-    for (int z = 0; z < GRID_H; ++z) {
-        for (int x = 0; x < GRID_W; ++x) {
-            if (IsWater(x, z) != waterCells) continue;
+    for (int z=0; z<GRID_H; ++z) {
+        for (int x=0; x<GRID_W; ++x) {
+            float x0=(x-GRID_W/2)*CELL_SIZE, x1=x0+CELL_SIZE;
+            float z0=(z-GRID_H/2)*CELL_SIZE, z1=z0+CELL_SIZE;
+            float y00=cornerHeight(x,z)-0.018f;
+            float y10=cornerHeight(x+1,z)-0.018f;
+            float y01=cornerHeight(x,z+1)-0.018f;
+            float y11=cornerHeight(x+1,z+1)-0.018f;
+            Color c00=colorAt(y00,x,z), c10=colorAt(y10,x+1,z);
+            Color c01=colorAt(y01,x,z+1), c11=colorAt(y11,x+1,z+1);
 
-            float x0 = (x - GRID_W / 2) * CELL_SIZE;
-            float x1 = x0 + CELL_SIZE;
-            float z0 = (z - GRID_H / 2) * CELL_SIZE;
-            float z1 = z0 + CELL_SIZE;
-
-            float y00, y10, y01, y11;
-            if (waterCells) {
-                y00 = y10 = y01 = y11 = WATER_LEVEL - 0.035f;
-            } else {
-                y00 = cornerHeight(x, z) - 0.018f;
-                y10 = cornerHeight(x + 1, z) - 0.018f;
-                y01 = cornerHeight(x, z + 1) - 0.018f;
-                y11 = cornerHeight(x + 1, z + 1) - 0.018f;
-            }
-
-            Vector3 p = GridToWorld(x, z);
-            int variation = (int)(Hash01(x, z, 111) * 7.0f) - 3;
-            Color col;
-            if (waterCells) {
-                col = Color{(unsigned char)(49 + variation), (unsigned char)(121 + variation),
-                            (unsigned char)(163 + variation), 255};
-            } else if (IsShore(x, z)) {
-                col = Color{177, 168, 126, 255};
-            } else if (p.y > 1.75f) {
-                col = Color{107, 124, 99, 255};
-            } else {
-                float shade = Clamp((p.y + 0.2f) / 2.5f, 0.0f, 1.0f);
-                col = Color{
-                    (unsigned char)Clamp(74.0f + shade * 18.0f + variation, 0.0f, 255.0f),
-                    (unsigned char)Clamp(126.0f + shade * 26.0f + variation, 0.0f, 255.0f),
-                    (unsigned char)Clamp(77.0f + shade * 16.0f + variation, 0.0f, 255.0f),
-                    255
-                };
-            }
-
-            pushVertex(x0, y00, z0, col); pushVertex(x1, y11, z1, col); pushVertex(x1, y10, z0, col);
-            pushVertex(x0, y00, z0, col); pushVertex(x0, y01, z1, col); pushVertex(x1, y11, z1, col);
+            push(x0,y00,z0,c00); push(x1,y11,z1,c11); push(x1,y10,z0,c10);
+            push(x0,y00,z0,c00); push(x0,y01,z1,c01); push(x1,y11,z1,c11);
         }
     }
 
-    UploadMesh(&mesh, false);
+    UploadMesh(&mesh,false);
     return LoadModelFromMesh(mesh);
 }
 
@@ -1005,20 +1119,72 @@ void City::DrawRoadTile(int x, int z, bool detailed) const {
 
 void City::DrawRoads(const Camera3D& camera) const {
     float cameraDistance = Vector3Distance(camera.position, camera.target);
-    float visibleRadius = cameraDistance * 1.80f + 32.0f;
-    float detailRadius = cameraDistance * 0.50f + 28.0f;
+    float visibleRadius = cameraDistance * 1.80f + 34.0f;
     float visibleSq = visibleRadius * visibleRadius;
-    float detailSq = detailRadius * detailRadius;
 
-    for (int z = 0; z < GRID_H; ++z) {
-        for (int x = 0; x < GRID_W; ++x) {
-            if (!RoadAt(x, z)) continue;
-            Vector3 p = GridToWorld(x, z);
-            float dx = p.x - camera.target.x;
-            float dz = p.z - camera.target.z;
-            float d2 = dx * dx + dz * dz;
-            if (d2 > visibleSq) continue;
-            DrawRoadTile(x, z, d2 <= detailSq);
+    auto strip = [](Vector3 a, Vector3 b, float halfWidth, float lift, Color col) {
+        Vector3 d{b.x-a.x, 0.0f, b.z-a.z};
+        float len = sqrtf(d.x*d.x + d.z*d.z);
+        if (len < 0.001f) return;
+        d.x/=len; d.z/=len;
+        Vector3 p{-d.z*halfWidth, 0.0f, d.x*halfWidth};
+        a.y += lift; b.y += lift;
+
+        Vector3 aL{a.x+p.x,a.y,a.z+p.z};
+        Vector3 aR{a.x-p.x,a.y,a.z-p.z};
+        Vector3 bL{b.x+p.x,b.y,b.z+p.z};
+        Vector3 bR{b.x-p.x,b.y,b.z-p.z};
+
+        DrawTriangle3D(aL,bL,bR,col);
+        DrawTriangle3D(aL,bR,aR,col);
+    };
+
+    const float sidewalkHalf = CELL_SIZE * 0.39f;
+    const float roadHalf = CELL_SIZE * 0.30f;
+    Color sidewalk{169, 170, 164, 255};
+    Color asphalt{54, 60, 64, 255};
+    Color lane{218, 211, 170, 205};
+
+    // Connect each node only in forward directions to avoid duplicate geometry.
+    const int dirs[4][2] = {{1,0},{0,1},{1,1},{1,-1}};
+
+    for (int z=0; z<GRID_H; ++z) {
+        for (int x=0; x<GRID_W; ++x) {
+            if (!RoadAt(x,z)) continue;
+            Vector3 p = GridToWorld(x,z);
+            float dx=p.x-camera.target.x, dz=p.z-camera.target.z;
+            if (dx*dx+dz*dz > visibleSq) continue;
+
+            // Rounded node hides the underlying cell structure at intersections and corners.
+            DrawCylinder({p.x,p.y+0.028f,p.z}, sidewalkHalf, sidewalkHalf, 0.075f, 20, sidewalk);
+            DrawCylinder({p.x,p.y+0.072f,p.z}, roadHalf, roadHalf, 0.085f, 20, asphalt);
+
+            for (const auto& d : dirs) {
+                int nx=x+d[0], nz=z+d[1];
+                if (!RoadAt(nx,nz)) continue;
+                Vector3 q=GridToWorld(nx,nz);
+
+                // Avoid visually cutting across a corner if a diagonal connection is only
+                // incidental to two orthogonal road cells.
+                if (d[0] != 0 && d[1] != 0) {
+                    bool orthA = RoadAt(x+d[0],z);
+                    bool orthB = RoadAt(x,z+d[1]);
+                    if (orthA && orthB) continue;
+                }
+
+                strip(p,q,sidewalkHalf,0.050f,sidewalk);
+                strip(p,q,roadHalf,0.095f,asphalt);
+
+                float segLen = sqrtf((q.x-p.x)*(q.x-p.x)+(q.z-p.z)*(q.z-p.z));
+                if (segLen > CELL_SIZE*0.95f) {
+                    strip(p,q,0.018f,0.145f,lane);
+                }
+            }
+
+            unsigned int lampHash = HashCell(x,z,90);
+            if (lampHash % 17u == 0u) {
+                DrawStreetLight({p.x + sidewalkHalf*0.88f,p.y+0.09f,p.z}, false);
+            }
         }
     }
 }
@@ -1072,6 +1238,40 @@ void City::DrawServices(const Camera3D& camera) const {
     }
 }
 
+void City::DrawTraffic(const Camera3D& camera) const {
+    float camDist = Vector3Distance(camera.position, camera.target);
+    float visibleRadius = camDist * 1.55f + 24.0f;
+    float visibleSq = visibleRadius * visibleRadius;
+
+    for (const auto& v : vehicles_) {
+        Vector3 a=GridToWorld(v.x,v.z);
+        Vector3 b=GridToWorld(v.nextX,v.nextZ);
+        Vector3 pos{
+            a.x+(b.x-a.x)*v.t,
+            a.y+(b.y-a.y)*v.t+0.22f,
+            a.z+(b.z-a.z)*v.t
+        };
+
+        float dx=pos.x-camera.target.x, dz=pos.z-camera.target.z;
+        if(dx*dx+dz*dz>visibleSq) continue;
+
+        Vector3 dir{b.x-a.x,0.0f,b.z-a.z};
+        float len=sqrtf(dir.x*dir.x+dir.z*dir.z);
+        if(len<0.001f) continue;
+        dir.x/=len; dir.z/=len;
+
+        // Two-way lane offset.
+        Vector3 perp{-dir.z,0.0f,dir.x};
+        pos.x += perp.x*0.15f;
+        pos.z += perp.z*0.15f;
+
+        Vector3 front{pos.x+dir.x*0.23f,pos.y,pos.z+dir.z*0.23f};
+        Vector3 rear {pos.x-dir.x*0.23f,pos.y,pos.z-dir.z*0.23f};
+        DrawCylinderEx(rear,front,0.13f,0.13f,8,v.color);
+        DrawSphereEx({pos.x,pos.y+0.10f,pos.z},0.105f,3,7,Color{113,153,170,255});
+    }
+}
+
 void City::DrawPlacementPreview() const {
     if (hoverX_ < 0 || hoverZ_ < 0) return;
     int w = 1, d = 1;
@@ -1093,6 +1293,7 @@ void City::Draw3D(const Camera3D& camera) const {
     DrawNaturalProps(camera);
     DrawZones(camera);
     DrawRoads(camera);
+    DrawTraffic(camera);
     DrawServices(camera);
     DrawBuildings(camera);
     DrawPlacementPreview();
@@ -1125,13 +1326,16 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.6", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.7", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});
 
     std::string score = "SCORE " + std::to_string(cityScore_);
     DrawText(score.c_str(), 292, 14, 12, cityScore_ >= 70 ? Color{105, 201, 127, 255} : Color{220, 184, 92, 255});
+
+    std::string traffic = "VERKEHR " + std::to_string(vehicles_.size());
+    DrawText(traffic.c_str(), 380, 14, 11, Color{153, 181, 188, 255});
 
     std::string date = std::to_string(day_) + "." + std::to_string(month_) + "." + std::to_string(year_);
     int dateW = MeasureText(date.c_str(), 13);

@@ -9,7 +9,9 @@ Color BuildingRenderer::Shift(Color c, int amount) {
 }
 
 void BuildingRenderer::DrawShadow(Vector3 center, float width, float depth, float groundY) {
-    DrawCube({center.x + 0.18f, groundY + 0.015f, center.z + 0.18f}, width * 0.95f, 0.02f, depth * 0.95f, Color{35, 43, 40, 80});
+    float radius = std::max(width, depth) * 0.43f;
+    DrawCylinder({center.x + 0.15f, groundY + 0.010f, center.z + 0.17f},
+                 radius, radius * 0.92f, 0.018f, 20, Color{30, 39, 37, 68});
 }
 
 void BuildingRenderer::DrawWindows(Vector3 c, float w, float h, float d, int floors, int columns, Color glass) {
@@ -31,11 +33,16 @@ void BuildingRenderer::DrawWindows(Vector3 c, float w, float h, float d, int flo
 }
 
 void BuildingRenderer::DrawTree(Vector3 p, float s, int seed) {
-    Color trunk{92, 70, 49, 255};
-    Color foliage = (seed % 3 == 0) ? Color{72, 118, 70, 255} : ((seed % 3 == 1) ? Color{65, 108, 62, 255} : Color{83, 128, 72, 255});
-    DrawCylinder({p.x, p.y + 0.34f * s, p.z}, 0.07f * s, 0.09f * s, 0.68f * s, 6, trunk);
-    DrawSphereEx({p.x, p.y + 0.92f * s, p.z}, 0.40f * s, 4, 7, foliage);
-    DrawSphereEx({p.x + 0.17f * s, p.y + 1.02f * s, p.z - 0.08f * s}, 0.26f * s, 3, 6, Shift(foliage, 10));
+    Color trunk{88, 68, 48, 255};
+    Color foliage = (seed % 3 == 0) ? Color{68, 116, 67, 255}
+                    : ((seed % 3 == 1) ? Color{60, 106, 62, 255} : Color{78, 128, 72, 255});
+
+    DrawCylinder({p.x, p.y + 0.33f*s, p.z}, 0.065f*s, 0.085f*s, 0.66f*s, 8, trunk);
+
+    // Three overlapping crowns are less "voxel" than one geometric blob.
+    DrawSphereEx({p.x, p.y + 0.90f*s, p.z}, 0.36f*s, 5, 8, foliage);
+    DrawSphereEx({p.x - 0.18f*s, p.y + 0.92f*s, p.z + 0.06f*s}, 0.25f*s, 4, 7, Shift(foliage, 7));
+    DrawSphereEx({p.x + 0.17f*s, p.y + 1.02f*s, p.z - 0.09f*s}, 0.27f*s, 4, 7, Shift(foliage, 12));
 }
 
 void BuildingRenderer::DrawSimplified(const Building& b, Vector3 p, float lotW, float lotD) {
@@ -304,8 +311,20 @@ void BuildingRenderer::DrawBuilding(const Building& b, Vector3 center, float lot
         float h = 2.4f + b.level * 0.95f;
         float r = std::min(lotWidth, lotDepth) * 0.20f;
         Vector3 q{center.x - lotWidth * 0.18f, center.y + 0.08f, center.z};
-        DrawCylinder({q.x, q.y, q.z}, r * 0.90f, r, h, 20, Color{105, 151, 171, 255});
-        DrawCylinder({q.x, q.y + h, q.z}, r * 0.72f, r * 0.90f, 0.22f, 20, Color{66, 83, 92, 255});
+        DrawCylinder({q.x, q.y, q.z}, r * 0.90f, r, h, 24, Color{105, 151, 171, 255});
+        DrawCylinder({q.x, q.y + h, q.z}, r * 0.72f, r * 0.90f, 0.22f, 24, Color{66, 83, 92, 255});
+    } else if (b.zone == Zone::Commercial && (b.variant % 5 == 4)) {
+        float r = std::min(lotWidth, lotDepth) * 0.24f;
+        float h = 1.20f + b.level * 0.55f;
+        Vector3 q{center.x + lotWidth*0.18f, center.y + 0.08f, center.z + lotDepth*0.12f};
+        DrawCylinder({q.x,q.y,q.z}, r, r*0.92f, h, 24, Color{129,166,181,255});
+        DrawCylinder({q.x,q.y+h,q.z}, r*0.94f,r*0.94f,0.12f,24,Color{65,81,89,255});
+    } else if (b.zone == Zone::Industrial && (b.variant % 4 == 2)) {
+        float r = std::min(lotWidth, lotDepth) * 0.16f;
+        DrawCylinder({center.x + lotWidth*0.25f, center.y+0.08f, center.z-lotDepth*0.20f},
+                     r,r,1.20f+b.level*0.18f,20,Color{156,160,153,255});
+        DrawCylinder({center.x + lotWidth*0.25f, center.y+1.34f+b.level*0.18f, center.z-lotDepth*0.20f},
+                     0.06f,r*0.94f,0.18f,20,Color{120,125,121,255});
     }
 
     if (!b.powered) {

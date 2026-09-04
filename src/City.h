@@ -26,6 +26,18 @@ private:
         int seed = 0;
     };
 
+    struct Vehicle {
+        int x = 0;
+        int z = 0;
+        int nextX = 0;
+        int nextZ = 0;
+        int prevX = -1;
+        int prevZ = -1;
+        float t = 0.0f;
+        float speed = 0.70f;
+        Color color{190, 70, 65, 255};
+    };
+
     bool Inside(int x, int z) const;
     float ComputeTerrainHeight(int x, int z) const;
     float TerrainHeight(int x, int z) const;
@@ -74,6 +86,9 @@ private:
     void RecalculateDemand();
     void RecalculateBudgetPreview();
     void CheckMilestones();
+    void UpdateTraffic(float dt);
+    void SpawnVehicle();
+    bool PickNextRoadCell(Vehicle& vehicle);
 
     void BuildTerrainCache();
     void BuildTerrainModels();
@@ -87,6 +102,7 @@ private:
     void DrawZones(const Camera3D& camera) const;
     void DrawBuildings(const Camera3D& camera) const;
     void DrawServices(const Camera3D& camera) const;
+    void DrawTraffic(const Camera3D& camera) const;
     void DrawPlacementPreview() const;
 
     void DrawTopBar() const;
@@ -105,6 +121,7 @@ private:
     std::vector<Building> buildings_;
     std::vector<ServiceStructure> services_;
     std::vector<NaturalProp> naturalProps_;
+    std::vector<Vehicle> vehicles_;
 
     Model landModel_{};
     Model waterModel_{};
@@ -157,4 +174,7 @@ private:
     int lastMilestoneReward_ = 0;
     int milestoneBannerDays_ = 0;
     bool financialWarning_ = false;
+
+    float trafficSpawnTimer_ = 0.0f;
+    int completedTrips_ = 0;
 };
