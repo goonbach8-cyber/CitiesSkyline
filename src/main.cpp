@@ -84,7 +84,7 @@ int main() {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
 #endif
 
-    InitWindow(1280, 720, "City Lab C++ v0.9 Game HUD");
+    InitWindow(1280, 720, "City Lab C++ v0.10 Curved Roads");
     SetTargetFPS(60);
 
     // IMPORTANT: Keep these out of the WebAssembly stack.

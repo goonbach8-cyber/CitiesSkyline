@@ -73,6 +73,7 @@ private:
     Vector3 GridToWorld(int x, int z) const;
     Vector3 LotCenter(int x, int z, int w, int d) const;
     float LotGroundHeight(int x, int z, int w, int d) const;
+    bool MouseToWorld(const Camera3D& camera, Vector3& hit) const;
     bool MouseToGrid(const Camera3D& camera, int& gx, int& gz) const;
 
     unsigned int HashCell(int x, int z, int salt = 0) const;
@@ -99,6 +100,9 @@ private:
     void HandleUIInput();
     void SetTool(Tool tool);
     void PlaceRoadLine(int x0, int z0, int x1, int z1);
+    void PlaceDraggedRoad();
+    std::vector<Vector3> BuildDraggedRoadCurve() const;
+    bool RoadCurvePointValid(const Vector3& p) const;
     void PaintZoneRect(int x0, int z0, int x1, int z1, Zone zone);
     void BulldozeAt(int x, int z);
     void PlaceService(ServiceKind kind, int x, int z);
@@ -132,6 +136,7 @@ private:
     void DrawBuildings(const Camera3D& camera) const;
     void DrawServices(const Camera3D& camera) const;
     void DrawTraffic(const Camera3D& camera) const;
+    void DrawRoadPreview() const;
     void DrawPlacementPreview() const;
 
     void DrawTopBar() const;
@@ -163,6 +168,9 @@ private:
     int dragStartZ_ = 0;
     int hoverX_ = -1;
     int hoverZ_ = -1;
+    std::vector<Vector3> roadDragWorld_;
+    Vector3 roadDragCurrent_{0.0f, 0.0f, 0.0f};
+    bool roadDragCurrentValid_ = false;
 
     int money_ = 60000;
     int population_ = 0;

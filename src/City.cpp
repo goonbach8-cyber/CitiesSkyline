@@ -159,7 +159,7 @@ Vector3 City::LotCenter(int x, int z, int w, int d) const {
     return {wx, LotGroundHeight(x, z, w, d), wz};
 }
 
-bool City::MouseToGrid(const Camera3D& camera, int& gx, int& gz) const {
+bool City::MouseToWorld(const Camera3D& camera, Vector3& hit) const {
     Ray ray = GetMouseRay(GetMousePosition(), camera);
     if (fabsf(ray.direction.y) < 0.00001f) return false;
 
@@ -167,15 +167,23 @@ bool City::MouseToGrid(const Camera3D& camera, int& gx, int& gz) const {
     float t = (targetY - ray.position.y) / ray.direction.y;
     if (t < 0.0f) return false;
 
-    // Refine intersection against the sampled terrain height. This is much more accurate on hills.
-    for (int i = 0; i < 4; ++i) {
-        Vector3 hit = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
+    for (int i = 0; i < 5; ++i) {
+        hit = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
         float h = TerrainHeightAtWorld(hit.x, hit.z);
         t = (h - ray.position.y) / ray.direction.y;
         if (t < 0.0f) return false;
     }
 
-    Vector3 hit = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
+    hit = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
+    float gx = hit.x / CELL_SIZE + GRID_W / 2.0f;
+    float gz = hit.z / CELL_SIZE + GRID_H / 2.0f;
+    return gx >= 0.0f && gx < GRID_W && gz >= 0.0f && gz < GRID_H;
+}
+
+bool City::MouseToGrid(const Camera3D& camera, int& gx, int& gz) const {
+    Vector3 hit{};
+    if (!MouseToWorld(camera, hit)) return false;
+
     gx = (int)floorf(hit.x / CELL_SIZE + GRID_W / 2.0f);
     gz = (int)floorf(hit.z / CELL_SIZE + GRID_H / 2.0f);
     return Inside(gx, gz);
@@ -339,6 +347,8 @@ float City::PollutionAt(int x, int z) const {
 void City::SetTool(Tool tool) {
     tool_ = tool;
     dragging_ = false;
+    roadDragWorld_.clear();
+    roadDragCurrentValid_ = false;
 }
 
 void City::SelectToolExternal(int tool) {
@@ -396,8 +406,16 @@ void City::HandleInput(const Camera3D& camera) {
 
     HandleUIInput();
 
+    Vector3 worldHit{};
+    bool hasWorldHit = MouseToWorld(camera, worldHit);
+
     int gx = -1, gz = -1;
-    if (MouseToGrid(camera, gx, gz)) {
+    if (hasWorldHit) {
+        gx = (int)floorf(worldHit.x / CELL_SIZE + GRID_W / 2.0f);
+        gz = (int)floorf(worldHit.z / CELL_SIZE + GRID_H / 2.0f);
+    }
+
+    if (Inside(gx, gz)) {
         hoverX_ = gx;
         hoverZ_ = gz;
     } else {
@@ -412,6 +430,22 @@ void City::HandleInput(const Camera3D& camera) {
     if (m.y < 42.0f || m.y > hudTop) return;
 #endif
 
+    if (tool_ == Tool::Road && dragging_ && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && hasWorldHit) {
+        roadDragCurrent_ = worldHit;
+        roadDragCurrentValid_ = true;
+
+        if (roadDragWorld_.empty()) {
+            roadDragWorld_.push_back(worldHit);
+        } else {
+            Vector3 last = roadDragWorld_.back();
+            float dx = worldHit.x - last.x;
+            float dz = worldHit.z - last.z;
+            if (dx * dx + dz * dz >= (CELL_SIZE * 0.42f) * (CELL_SIZE * 0.42f)) {
+                roadDragWorld_.push_back(worldHit);
+            }
+        }
+    }
+
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hoverX_ >= 0) {
         if (tool_ == Tool::Bulldoze) {
             BulldozeAt(hoverX_, hoverZ_);
@@ -425,47 +459,159 @@ void City::HandleInput(const Camera3D& camera) {
             dragging_ = true;
             dragStartX_ = hoverX_;
             dragStartZ_ = hoverZ_;
+
+            if (tool_ == Tool::Road) {
+                roadDragWorld_.clear();
+                Vector3 start = GridToWorld(hoverX_, hoverZ_);
+                start.y = TerrainHeightAtWorld(start.x, start.z);
+                roadDragWorld_.push_back(start);
+                roadDragCurrent_ = hasWorldHit ? worldHit : start;
+                roadDragCurrentValid_ = true;
+            }
         }
     }
 
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) && dragging_) {
-        if (hoverX_ >= 0) {
-            if (tool_ == Tool::Road) PlaceRoadLine(dragStartX_, dragStartZ_, hoverX_, hoverZ_);
-            else if (tool_ == Tool::Residential) PaintZoneRect(dragStartX_, dragStartZ_, hoverX_, hoverZ_, Zone::Residential);
+        if (tool_ == Tool::Road) {
+            if (hasWorldHit) {
+                roadDragCurrent_ = worldHit;
+                roadDragCurrentValid_ = true;
+            }
+            PlaceDraggedRoad();
+        } else if (hoverX_ >= 0) {
+            if (tool_ == Tool::Residential) PaintZoneRect(dragStartX_, dragStartZ_, hoverX_, hoverZ_, Zone::Residential);
             else if (tool_ == Tool::Commercial) PaintZoneRect(dragStartX_, dragStartZ_, hoverX_, hoverZ_, Zone::Commercial);
             else if (tool_ == Tool::Industrial) PaintZoneRect(dragStartX_, dragStartZ_, hoverX_, hoverZ_, Zone::Industrial);
         }
+
         dragging_ = false;
+        roadDragWorld_.clear();
+        roadDragCurrentValid_ = false;
     }
 }
 
 void City::PlaceRoadLine(int x0, int z0, int x1, int z1) {
-    int rawDx = x1 - x0;
-    int rawDz = z1 - z0;
-    if (rawDx == 0 && rawDz == 0) return;
+    roadDragWorld_.clear();
+    roadDragWorld_.push_back(GridToWorld(x0, z0));
+    roadDragWorld_.push_back(GridToWorld(x1, z1));
+    roadDragCurrent_ = GridToWorld(x1, z1);
+    roadDragCurrentValid_ = true;
+    PlaceDraggedRoad();
+    roadDragWorld_.clear();
+    roadDragCurrentValid_ = false;
+}
 
-    // Snap to the nearest 45 degrees. This version deliberately favours stable,
-    // clean roads over arbitrary-angle zig-zags. True splines come next.
-    float angle = atan2f((float)rawDz, (float)rawDx);
-    const float step = PI / 4.0f;
-    float snapped = roundf(angle / step) * step;
-    int dirX = (int)roundf(cosf(snapped));
-    int dirZ = (int)roundf(sinf(snapped));
-    int length = std::max(abs(rawDx), abs(rawDz));
+std::vector<Vector3> City::BuildDraggedRoadCurve() const {
+    std::vector<Vector3> controls = roadDragWorld_;
 
-    int prevX = x0;
-    int prevZ = z0;
+    if (roadDragCurrentValid_) {
+        if (controls.empty()) {
+            controls.push_back(roadDragCurrent_);
+        } else {
+            Vector3 last = controls.back();
+            float dx = roadDragCurrent_.x - last.x;
+            float dz = roadDragCurrent_.z - last.z;
+            if (dx * dx + dz * dz > 0.04f) controls.push_back(roadDragCurrent_);
+        }
+    }
+
+    if (controls.size() < 2) return controls;
+
+    // Simplify tiny mouse jitter before smoothing.
+    std::vector<Vector3> simplified;
+    simplified.reserve(controls.size());
+    simplified.push_back(controls.front());
+    for (size_t i = 1; i + 1 < controls.size(); ++i) {
+        Vector3 last = simplified.back();
+        float dx = controls[i].x - last.x;
+        float dz = controls[i].z - last.z;
+        if (dx * dx + dz * dz >= (CELL_SIZE * 0.30f) * (CELL_SIZE * 0.30f)) {
+            simplified.push_back(controls[i]);
+        }
+    }
+    simplified.push_back(controls.back());
+
+    // Chaikin corner cutting: two passes turn the hand-drawn polyline into a
+    // smooth road centreline while still following the player's mouse gesture.
+    std::vector<Vector3> curve = simplified;
+    for (int pass = 0; pass < 2 && curve.size() >= 2; ++pass) {
+        std::vector<Vector3> next;
+        next.reserve(curve.size() * 2);
+        next.push_back(curve.front());
+
+        for (size_t i = 0; i + 1 < curve.size(); ++i) {
+            const Vector3& a = curve[i];
+            const Vector3& b = curve[i + 1];
+
+            Vector3 q{
+                a.x * 0.75f + b.x * 0.25f,
+                0.0f,
+                a.z * 0.75f + b.z * 0.25f
+            };
+            Vector3 r{
+                a.x * 0.25f + b.x * 0.75f,
+                0.0f,
+                a.z * 0.25f + b.z * 0.75f
+            };
+            q.y = TerrainHeightAtWorld(q.x, q.z);
+            r.y = TerrainHeightAtWorld(r.x, r.z);
+            next.push_back(q);
+            next.push_back(r);
+        }
+
+        next.push_back(curve.back());
+        curve.swap(next);
+    }
+
+    // Resample so preview and placement have consistent spacing.
+    std::vector<Vector3> sampled;
+    sampled.push_back(curve.front());
+
+    for (size_t i = 0; i + 1 < curve.size(); ++i) {
+        Vector3 a = curve[i];
+        Vector3 b = curve[i + 1];
+        float dx = b.x - a.x;
+        float dz = b.z - a.z;
+        float len = sqrtf(dx * dx + dz * dz);
+        int steps = std::max(1, (int)ceilf(len / (CELL_SIZE * 0.22f)));
+
+        for (int s = 1; s <= steps; ++s) {
+            float t = (float)s / steps;
+            Vector3 p{
+                a.x + dx * t,
+                0.0f,
+                a.z + dz * t
+            };
+            p.y = TerrainHeightAtWorld(p.x, p.z);
+            sampled.push_back(p);
+        }
+    }
+
+    return sampled;
+}
+
+bool City::RoadCurvePointValid(const Vector3& p) const {
+    int x = (int)floorf(p.x / CELL_SIZE + GRID_W / 2.0f);
+    int z = (int)floorf(p.z / CELL_SIZE + GRID_H / 2.0f);
+    if (!Inside(x, z) || IsWater(x, z)) return false;
+    if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) return false;
+    return true;
+}
+
+void City::PlaceDraggedRoad() {
+    std::vector<Vector3> curve = BuildDraggedRoadCurve();
+    if (curve.size() < 2) return;
+
+    int prevX = -1;
+    int prevZ = -1;
     bool havePrev = false;
 
-    for (int i = 0; i <= length; ++i) {
-        int x = x0 + dirX * i;
-        int z = z0 + dirZ * i;
-
-        if (!Inside(x, z) || IsWater(x, z)) break;
-        if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) break;
+    auto addCell = [&](int x, int z) -> bool {
+        if (!Inside(x, z) || IsWater(x, z)) return false;
+        if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) return false;
 
         if (!RoadAt(x, z)) {
-            if (money_ < 120) break;
+            if (money_ < 120) return false;
             roads_[z][x] = true;
             roadLinks_[z][x] = 0;
             zones_[z][x] = Zone::None;
@@ -473,13 +619,47 @@ void City::PlaceRoadLine(int x0, int z0, int x1, int z1) {
             ++roadCount_;
         }
 
-        if (havePrev && (prevX != x || prevZ != z)) {
-            LinkRoadCells(prevX, prevZ, x, z);
+        if (havePrev && (x != prevX || z != prevZ)) {
+            int dx = x - prevX;
+            int dz = z - prevZ;
+
+            while (abs(dx) > 1 || abs(dz) > 1) {
+                int sx = prevX + (dx > 0 ? 1 : (dx < 0 ? -1 : 0));
+                int sz = prevZ + (dz > 0 ? 1 : (dz < 0 ? -1 : 0));
+                if (!Inside(sx, sz) || IsWater(sx, sz)) return false;
+                if (BuildingIndexAt(sx, sz) >= 0 || ServiceIndexAt(sx, sz) >= 0) return false;
+
+                if (!RoadAt(sx, sz)) {
+                    if (money_ < 120) return false;
+                    roads_[sz][sx] = true;
+                    roadLinks_[sz][sx] = 0;
+                    zones_[sz][sx] = Zone::None;
+                    money_ -= 120;
+                    ++roadCount_;
+                }
+
+                LinkRoadCells(prevX, prevZ, sx, sz);
+                prevX = sx;
+                prevZ = sz;
+                dx = x - prevX;
+                dz = z - prevZ;
+            }
+
+            if (x != prevX || z != prevZ) LinkRoadCells(prevX, prevZ, x, z);
         }
 
         prevX = x;
         prevZ = z;
         havePrev = true;
+        return true;
+    };
+
+    for (const auto& p : curve) {
+        int x = (int)floorf(p.x / CELL_SIZE + GRID_W / 2.0f);
+        int z = (int)floorf(p.z / CELL_SIZE + GRID_H / 2.0f);
+
+        if (havePrev && x == prevX && z == prevZ) continue;
+        if (!addCell(x, z)) break;
     }
 
     vehicles_.clear();
@@ -1206,25 +1386,26 @@ void City::DrawRoads(const Camera3D& camera) const {
         DrawTriangle3D(aL,bR,aR,col);
     };
 
-    auto dashedCenter = [&](Vector3 a, Vector3 b) {
-        Vector3 delta{b.x-a.x,b.y-a.y,b.z-a.z};
-        const int pieces = 5;
-        for (int i=0;i<pieces;++i) {
-            if ((i & 1) != 0) continue;
-            float t0 = (float)i / pieces + 0.055f;
-            float t1 = (float)(i+1) / pieces - 0.055f;
-            Vector3 p0{a.x+delta.x*t0,a.y+delta.y*t0,a.z+delta.z*t0};
-            Vector3 p1{a.x+delta.x*t1,a.y+delta.y*t1,a.z+delta.z*t1};
-            strip(p0,p1,0.016f,0.152f,Color{226,220,186,205});
+    auto nodeInfo = [&](int x, int z, int& degree, int& dirA, int& dirB, bool& curveNode) {
+        degree = 0; dirA = -1; dirB = -1;
+        unsigned char links = roadLinks_[z][x];
+        for (int dir=0; dir<8; ++dir) {
+            if ((links & (1u<<dir)) == 0) continue;
+            if (degree == 0) dirA = dir;
+            else if (degree == 1) dirB = dir;
+            ++degree;
         }
+        curveNode = degree == 2 && dirA >= 0 && dirB >= 0 && OppositeRoadDir(dirA) != dirB;
     };
 
-    const float sidewalkHalf = CELL_SIZE * 0.395f;
-    const float asphaltHalf = CELL_SIZE * 0.305f;
-    Color sidewalk{170, 172, 168, 255};
-    Color asphalt{49, 54, 58, 255};
-    Color curb{133, 138, 137, 255};
+    const float sidewalkHalf = CELL_SIZE * 0.385f;
+    const float asphaltHalf = CELL_SIZE * 0.300f;
+    const float cornerTrim = CELL_SIZE * 0.34f;
+    Color sidewalk{171, 173, 169, 255};
+    Color asphalt{47, 52, 56, 255};
+    Color lane{221, 216, 185, 180};
 
+    // First pass: straight edge bodies, trimmed around curved degree-2 nodes.
     for (int z=0; z<GRID_H; ++z) {
         for (int x=0; x<GRID_W; ++x) {
             if (!RoadAt(x,z)) continue;
@@ -1234,68 +1415,93 @@ void City::DrawRoads(const Camera3D& camera) const {
             if (camX*camX+camZ*camZ > visibleSq) continue;
 
             unsigned char links = roadLinks_[z][x];
-            int degree = 0;
-            int dirA = -1, dirB = -1;
-            for (int dir=0;dir<8;++dir) {
-                if ((links & (1u<<dir)) == 0) continue;
-                if (degree==0) dirA=dir;
-                else if (degree==1) dirB=dir;
-                ++degree;
-            }
-
-            // Draw each real graph edge exactly once.
             for (int dir=0; dir<8; ++dir) {
-                if ((links & (1u << dir)) == 0) continue;
+                if ((links & (1u<<dir)) == 0) continue;
                 int nx=x+ROAD_DIRS[dir][0], nz=z+ROAD_DIRS[dir][1];
                 if (!Inside(nx,nz)) continue;
                 if (nz < z || (nz == z && nx < x)) continue;
 
-                Vector3 q=GridToWorld(nx,nz);
-
-                // Slight overlap at both ends hides seams between neighbouring road pieces.
+                Vector3 q = GridToWorld(nx,nz);
                 Vector3 d{q.x-p.x,0.0f,q.z-p.z};
                 float len=sqrtf(d.x*d.x+d.z*d.z);
-                if(len>0.001f){
-                    d.x/=len; d.z/=len;
-                    Vector3 a{p.x-d.x*0.12f,p.y,p.z-d.z*0.12f};
-                    Vector3 b{q.x+d.x*0.12f,q.y,q.z+d.z*0.12f};
-                    strip(a,b,sidewalkHalf,0.048f,sidewalk);
-                    strip(a,b,asphaltHalf,0.100f,asphalt);
-                    dashedCenter(a,b);
+                if(len<0.001f) continue;
+                d.x/=len; d.z/=len;
+
+                int dp, ap, bp, dq, aq, bq;
+                bool curveP, curveQ;
+                nodeInfo(x,z,dp,ap,bp,curveP);
+                nodeInfo(nx,nz,dq,aq,bq,curveQ);
+
+                Vector3 a=p, b=q;
+                if(curveP){ a.x += d.x*cornerTrim; a.z += d.z*cornerTrim; a.y = TerrainHeightAtWorld(a.x,a.z); }
+                if(curveQ){ b.x -= d.x*cornerTrim; b.z -= d.z*cornerTrim; b.y = TerrainHeightAtWorld(b.x,b.z); }
+
+                strip(a,b,sidewalkHalf,0.050f,sidewalk);
+                strip(a,b,asphaltHalf,0.102f,asphalt);
+
+                // One subtle centre dash per graph edge instead of the old bead pattern.
+                Vector3 l0{
+                    a.x+(b.x-a.x)*0.34f,
+                    a.y+(b.y-a.y)*0.34f,
+                    a.z+(b.z-a.z)*0.34f
+                };
+                Vector3 l1{
+                    a.x+(b.x-a.x)*0.66f,
+                    a.y+(b.y-a.y)*0.66f,
+                    a.z+(b.z-a.z)*0.66f
+                };
+                strip(l0,l1,0.014f,0.151f,lane);
+            }
+        }
+    }
+
+    // Second pass: actual smooth arcs at corners, and compact pads only at
+    // endpoints/intersections.
+    for (int z=0; z<GRID_H; ++z) {
+        for (int x=0; x<GRID_W; ++x) {
+            if (!RoadAt(x,z)) continue;
+            Vector3 p=GridToWorld(x,z);
+
+            int degree, dirA, dirB;
+            bool curveNode;
+            nodeInfo(x,z,degree,dirA,dirB,curveNode);
+
+            if (curveNode) {
+                Vector3 na = GridToWorld(x+ROAD_DIRS[dirA][0], z+ROAD_DIRS[dirA][1]);
+                Vector3 nb = GridToWorld(x+ROAD_DIRS[dirB][0], z+ROAD_DIRS[dirB][1]);
+
+                Vector3 da{na.x-p.x,0.0f,na.z-p.z};
+                Vector3 db{nb.x-p.x,0.0f,nb.z-p.z};
+                float la=sqrtf(da.x*da.x+da.z*da.z), lb=sqrtf(db.x*db.x+db.z*db.z);
+                if(la<0.001f||lb<0.001f) continue;
+                da.x/=la; da.z/=la; db.x/=lb; db.z/=lb;
+
+                Vector3 a{p.x+da.x*cornerTrim,0.0f,p.z+da.z*cornerTrim};
+                Vector3 b{p.x+db.x*cornerTrim,0.0f,p.z+db.z*cornerTrim};
+                a.y=TerrainHeightAtWorld(a.x,a.z);
+                b.y=TerrainHeightAtWorld(b.x,b.z);
+
+                Vector3 prev=a;
+                const int segments=9;
+                for(int s=1;s<=segments;++s){
+                    float t=(float)s/segments;
+                    float omt=1.0f-t;
+                    Vector3 cur{
+                        omt*omt*a.x + 2.0f*omt*t*p.x + t*t*b.x,
+                        0.0f,
+                        omt*omt*a.z + 2.0f*omt*t*p.z + t*t*b.z
+                    };
+                    cur.y=TerrainHeightAtWorld(cur.x,cur.z);
+                    strip(prev,cur,sidewalkHalf,0.050f,sidewalk);
+                    strip(prev,cur,asphaltHalf,0.102f,asphalt);
+                    prev=cur;
                 }
-            }
-
-            bool straight = false;
-            if (degree == 2 && dirA >= 0 && dirB >= 0) {
-                straight = OppositeRoadDir(dirA) == dirB;
-            }
-
-            // A straight road has no visible node at all. Only real ends, corners
-            // and junctions receive joint geometry.
-            if (degree == 1) {
-                DrawCylinder({p.x,p.y+0.050f,p.z},sidewalkHalf,sidewalkHalf,0.070f,32,sidewalk);
-                DrawCylinder({p.x,p.y+0.102f,p.z},asphaltHalf,asphaltHalf,0.082f,32,asphalt);
+            } else if (degree == 1) {
+                DrawCylinder({p.x,p.y+0.052f,p.z},sidewalkHalf,sidewalkHalf,0.068f,32,sidewalk);
+                DrawCylinder({p.x,p.y+0.104f,p.z},asphaltHalf,asphaltHalf,0.080f,32,asphalt);
             } else if (degree >= 3) {
-                DrawCylinder({p.x,p.y+0.050f,p.z},sidewalkHalf*1.03f,sidewalkHalf*1.03f,0.072f,36,sidewalk);
-                DrawCylinder({p.x,p.y+0.103f,p.z},asphaltHalf*1.08f,asphaltHalf*1.08f,0.084f,36,asphalt);
-            } else if (degree == 2 && !straight) {
-                // Small corner filler, deliberately much smaller than v0.8's bead-like nodes.
-                DrawCylinder({p.x,p.y+0.052f,p.z},sidewalkHalf*0.76f,sidewalkHalf*0.76f,0.068f,28,sidewalk);
-                DrawCylinder({p.x,p.y+0.104f,p.z},asphaltHalf*0.82f,asphaltHalf*0.82f,0.082f,28,asphalt);
-            }
-
-            // Subtle curb ring only at junctions; straight segments stay clean.
-            if (degree >= 3) {
-                DrawCircle3D({p.x,p.y+0.148f,p.z},asphaltHalf*1.085f,{1,0,0},90.0f,curb);
-            }
-
-            if (degree == 2 && straight && HashCell(x,z,90)%29u==0u) {
-                int dir = dirA;
-                float dx=(float)ROAD_DIRS[dir][0], dz=(float)ROAD_DIRS[dir][1];
-                float len=sqrtf(dx*dx+dz*dz); if(len<0.1f) len=1.0f;
-                dx/=len; dz/=len;
-                Vector3 side{-dz,0.0f,dx};
-                DrawStreetLight({p.x+side.x*sidewalkHalf*0.90f,p.y+0.10f,p.z+side.z*sidewalkHalf*0.90f},fabsf(dx)>fabsf(dz));
+                DrawCylinder({p.x,p.y+0.052f,p.z},sidewalkHalf*1.02f,sidewalkHalf*1.02f,0.070f,36,sidewalk);
+                DrawCylinder({p.x,p.y+0.104f,p.z},asphaltHalf*1.06f,asphaltHalf*1.06f,0.082f,36,asphalt);
             }
         }
     }
@@ -1384,7 +1590,50 @@ void City::DrawTraffic(const Camera3D& camera) const {
     }
 }
 
+void City::DrawRoadPreview() const {
+    if (tool_ != Tool::Road || !dragging_) return;
+
+    std::vector<Vector3> curve = BuildDraggedRoadCurve();
+    if (curve.size() < 2) return;
+
+    auto strip = [](Vector3 a, Vector3 b, float halfWidth, float lift, Color col) {
+        Vector3 d{b.x-a.x,0.0f,b.z-a.z};
+        float len=sqrtf(d.x*d.x+d.z*d.z);
+        if(len<0.001f) return;
+        d.x/=len; d.z/=len;
+        Vector3 side{-d.z*halfWidth,0.0f,d.x*halfWidth};
+        a.y+=lift; b.y+=lift;
+
+        Vector3 aL{a.x+side.x,a.y,a.z+side.z};
+        Vector3 aR{a.x-side.x,a.y,a.z-side.z};
+        Vector3 bL{b.x+side.x,b.y,b.z+side.z};
+        Vector3 bR{b.x-side.x,b.y,b.z-side.z};
+        DrawTriangle3D(aL,bL,bR,col);
+        DrawTriangle3D(aL,bR,aR,col);
+    };
+
+    bool valid=true;
+    for(const auto& p:curve){
+        if(!RoadCurvePointValid(p)){ valid=false; break; }
+    }
+
+    Color outer = valid ? Color{92,192,214,115} : Color{226,87,75,125};
+    Color inner = valid ? Color{72,155,174,155} : Color{181,60,53,165};
+
+    for(size_t i=0;i+1<curve.size();++i){
+        Vector3 a=curve[i], b=curve[i+1];
+        strip(a,b,CELL_SIZE*0.39f,0.115f,outer);
+        strip(a,b,CELL_SIZE*0.29f,0.125f,inner);
+    }
+
+    Vector3 start=curve.front();
+    Vector3 end=curve.back();
+    DrawCylinder({start.x,start.y+0.14f,start.z},0.17f,0.17f,0.05f,20,Color{211,240,246,210});
+    DrawCylinder({end.x,end.y+0.14f,end.z},0.17f,0.17f,0.05f,20,valid?Color{211,240,246,210}:Color{247,132,117,220});
+}
+
 void City::DrawPlacementPreview() const {
+    if (tool_ == Tool::Road && dragging_) return;
     if (hoverX_ < 0 || hoverZ_ < 0) return;
     int w = 1, d = 1;
     Color c = tool_ == Tool::Bulldoze ? Color{226, 74, 74, 255} : Color{245, 218, 71, 255};
@@ -1405,6 +1654,7 @@ void City::Draw3D(const Camera3D& camera) const {
     DrawNaturalProps(camera);
     DrawZones(camera);
     DrawRoads(camera);
+    DrawRoadPreview();
     DrawTraffic(camera);
     DrawServices(camera);
     DrawBuildings(camera);
@@ -1438,7 +1688,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.9", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.10", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});
