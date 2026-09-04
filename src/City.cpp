@@ -1186,62 +1186,116 @@ void City::DrawRoadTile(int x, int z, bool detailed) const {
 
 void City::DrawRoads(const Camera3D& camera) const {
     float cameraDistance = Vector3Distance(camera.position, camera.target);
-    float visibleRadius = cameraDistance * 1.85f + 36.0f;
+    float visibleRadius = cameraDistance * 1.90f + 38.0f;
     float visibleSq = visibleRadius * visibleRadius;
 
     auto strip = [](Vector3 a, Vector3 b, float halfWidth, float lift, Color col) {
         Vector3 d{b.x-a.x, 0.0f, b.z-a.z};
         float len = sqrtf(d.x*d.x + d.z*d.z);
         if (len < 0.001f) return;
-        d.x/=len; d.z/=len;
-        Vector3 p{-d.z*halfWidth, 0.0f, d.x*halfWidth};
+        d.x /= len; d.z /= len;
+        Vector3 side{-d.z*halfWidth, 0.0f, d.x*halfWidth};
         a.y += lift; b.y += lift;
 
-        Vector3 aL{a.x+p.x,a.y,a.z+p.z};
-        Vector3 aR{a.x-p.x,a.y,a.z-p.z};
-        Vector3 bL{b.x+p.x,b.y,b.z+p.z};
-        Vector3 bR{b.x-p.x,b.y,b.z-p.z};
+        Vector3 aL{a.x+side.x,a.y,a.z+side.z};
+        Vector3 aR{a.x-side.x,a.y,a.z-side.z};
+        Vector3 bL{b.x+side.x,b.y,b.z+side.z};
+        Vector3 bR{b.x-side.x,b.y,b.z-side.z};
 
         DrawTriangle3D(aL,bL,bR,col);
         DrawTriangle3D(aL,bR,aR,col);
     };
 
-    const float sidewalkHalf = CELL_SIZE * 0.41f;
-    const float roadHalf = CELL_SIZE * 0.31f;
-    Color sidewalk{181, 182, 177, 255};
-    Color asphalt{51, 57, 61, 255};
-    Color lane{226, 219, 181, 205};
+    auto dashedCenter = [&](Vector3 a, Vector3 b) {
+        Vector3 delta{b.x-a.x,b.y-a.y,b.z-a.z};
+        const int pieces = 5;
+        for (int i=0;i<pieces;++i) {
+            if ((i & 1) != 0) continue;
+            float t0 = (float)i / pieces + 0.055f;
+            float t1 = (float)(i+1) / pieces - 0.055f;
+            Vector3 p0{a.x+delta.x*t0,a.y+delta.y*t0,a.z+delta.z*t0};
+            Vector3 p1{a.x+delta.x*t1,a.y+delta.y*t1,a.z+delta.z*t1};
+            strip(p0,p1,0.016f,0.152f,Color{226,220,186,205});
+        }
+    };
+
+    const float sidewalkHalf = CELL_SIZE * 0.395f;
+    const float asphaltHalf = CELL_SIZE * 0.305f;
+    Color sidewalk{170, 172, 168, 255};
+    Color asphalt{49, 54, 58, 255};
+    Color curb{133, 138, 137, 255};
 
     for (int z=0; z<GRID_H; ++z) {
         for (int x=0; x<GRID_W; ++x) {
             if (!RoadAt(x,z)) continue;
 
             Vector3 p = GridToWorld(x,z);
-            float dx=p.x-camera.target.x, dz=p.z-camera.target.z;
-            if (dx*dx+dz*dz > visibleSq) continue;
-
-            // High-segment round nodes create smooth joins without accidental links.
-            DrawCylinder({p.x,p.y+0.030f,p.z}, sidewalkHalf, sidewalkHalf, 0.078f, 28, sidewalk);
-            DrawCylinder({p.x,p.y+0.076f,p.z}, roadHalf, roadHalf, 0.090f, 28, asphalt);
+            float camX=p.x-camera.target.x, camZ=p.z-camera.target.z;
+            if (camX*camX+camZ*camZ > visibleSq) continue;
 
             unsigned char links = roadLinks_[z][x];
+            int degree = 0;
+            int dirA = -1, dirB = -1;
+            for (int dir=0;dir<8;++dir) {
+                if ((links & (1u<<dir)) == 0) continue;
+                if (degree==0) dirA=dir;
+                else if (degree==1) dirB=dir;
+                ++degree;
+            }
+
+            // Draw each real graph edge exactly once.
             for (int dir=0; dir<8; ++dir) {
                 if ((links & (1u << dir)) == 0) continue;
-
                 int nx=x+ROAD_DIRS[dir][0], nz=z+ROAD_DIRS[dir][1];
                 if (!Inside(nx,nz)) continue;
-
-                // Draw each graph edge once.
                 if (nz < z || (nz == z && nx < x)) continue;
 
                 Vector3 q=GridToWorld(nx,nz);
-                strip(p,q,sidewalkHalf,0.052f,sidewalk);
-                strip(p,q,roadHalf,0.100f,asphalt);
-                strip(p,q,0.018f,0.151f,lane);
+
+                // Slight overlap at both ends hides seams between neighbouring road pieces.
+                Vector3 d{q.x-p.x,0.0f,q.z-p.z};
+                float len=sqrtf(d.x*d.x+d.z*d.z);
+                if(len>0.001f){
+                    d.x/=len; d.z/=len;
+                    Vector3 a{p.x-d.x*0.12f,p.y,p.z-d.z*0.12f};
+                    Vector3 b{q.x+d.x*0.12f,q.y,q.z+d.z*0.12f};
+                    strip(a,b,sidewalkHalf,0.048f,sidewalk);
+                    strip(a,b,asphaltHalf,0.100f,asphalt);
+                    dashedCenter(a,b);
+                }
             }
 
-            if (HashCell(x,z,90) % 21u == 0u) {
-                DrawStreetLight({p.x + sidewalkHalf*0.90f,p.y+0.10f,p.z}, false);
+            bool straight = false;
+            if (degree == 2 && dirA >= 0 && dirB >= 0) {
+                straight = OppositeRoadDir(dirA) == dirB;
+            }
+
+            // A straight road has no visible node at all. Only real ends, corners
+            // and junctions receive joint geometry.
+            if (degree == 1) {
+                DrawCylinder({p.x,p.y+0.050f,p.z},sidewalkHalf,sidewalkHalf,0.070f,32,sidewalk);
+                DrawCylinder({p.x,p.y+0.102f,p.z},asphaltHalf,asphaltHalf,0.082f,32,asphalt);
+            } else if (degree >= 3) {
+                DrawCylinder({p.x,p.y+0.050f,p.z},sidewalkHalf*1.03f,sidewalkHalf*1.03f,0.072f,36,sidewalk);
+                DrawCylinder({p.x,p.y+0.103f,p.z},asphaltHalf*1.08f,asphaltHalf*1.08f,0.084f,36,asphalt);
+            } else if (degree == 2 && !straight) {
+                // Small corner filler, deliberately much smaller than v0.8's bead-like nodes.
+                DrawCylinder({p.x,p.y+0.052f,p.z},sidewalkHalf*0.76f,sidewalkHalf*0.76f,0.068f,28,sidewalk);
+                DrawCylinder({p.x,p.y+0.104f,p.z},asphaltHalf*0.82f,asphaltHalf*0.82f,0.082f,28,asphalt);
+            }
+
+            // Subtle curb ring only at junctions; straight segments stay clean.
+            if (degree >= 3) {
+                DrawCircle3D({p.x,p.y+0.148f,p.z},asphaltHalf*1.085f,{1,0,0},90.0f,curb);
+            }
+
+            if (degree == 2 && straight && HashCell(x,z,90)%29u==0u) {
+                int dir = dirA;
+                float dx=(float)ROAD_DIRS[dir][0], dz=(float)ROAD_DIRS[dir][1];
+                float len=sqrtf(dx*dx+dz*dz); if(len<0.1f) len=1.0f;
+                dx/=len; dz/=len;
+                Vector3 side{-dz,0.0f,dx};
+                DrawStreetLight({p.x+side.x*sidewalkHalf*0.90f,p.y+0.10f,p.z+side.z*sidewalkHalf*0.90f},fabsf(dx)>fabsf(dz));
             }
         }
     }
@@ -1384,7 +1438,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.8", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.9", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});
