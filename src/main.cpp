@@ -33,7 +33,7 @@ int main() {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
 #endif
 
-    InitWindow(1280, 720, "City Lab C++ v0.4.2 Performance Fix");
+    InitWindow(1280, 720, "City Lab C++ v0.5 Map + HUD");
     SetTargetFPS(60);
 
     // IMPORTANT: Keep these out of the WebAssembly stack.
