@@ -84,7 +84,7 @@ int main() {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
 #endif
 
-    InitWindow(1280, 720, "City Lab C++ v0.14 Connected Junctions");
+    InitWindow(1280, 720, "City Lab C++ v0.15 Road-aware Zoning");
     SetTargetFPS(60);
 
     // IMPORTANT: Keep these out of the WebAssembly stack.

@@ -84,6 +84,9 @@ private:
     float Hash01(int x, int z, int salt = 0) const;
 
     bool RoadAt(int x, int z) const;
+    float DistanceToVisibleRoad(float wx, float wz, Vector3* nearest = nullptr, Vector3* tangent = nullptr) const;
+    bool CellOverlapsVisibleRoad(int x, int z, float extraMargin = 0.0f) const;
+    bool ZoneCellEligible(int x, int z) const;
     bool RoadConnected(int x, int z, int nx, int nz) const;
     void LinkRoadCells(int x, int z, int nx, int nz);
     void UnlinkRoadCell(int x, int z);

@@ -1,6 +1,7 @@
 #include "City.h"
 #include "BuildingRenderer.h"
 #include "raymath.h"
+#include "rlgl.h"
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -203,6 +204,69 @@ bool City::RoadAt(int x, int z) const {
     return Inside(x, z) && roads_[z][x];
 }
 
+float City::DistanceToVisibleRoad(float wx, float wz, Vector3* nearest, Vector3* tangent) const {
+    float bestSq = 1.0e30f;
+    Vector3 bestPoint{wx, TerrainHeightAtWorld(wx, wz), wz};
+    Vector3 bestTangent{1.0f, 0.0f, 0.0f};
+
+    for (const auto& path : roadVisualPaths_) {
+        if (path.points.size() < 2) continue;
+
+        for (size_t i = 0; i + 1 < path.points.size(); ++i) {
+            const Vector3& a = path.points[i];
+            const Vector3& b = path.points[i + 1];
+
+            float abx = b.x - a.x;
+            float abz = b.z - a.z;
+            float lenSq = abx * abx + abz * abz;
+            if (lenSq < 0.00001f) continue;
+
+            float apx = wx - a.x;
+            float apz = wz - a.z;
+            float t = Clamp((apx * abx + apz * abz) / lenSq, 0.0f, 1.0f);
+
+            float px = a.x + abx * t;
+            float pz = a.z + abz * t;
+            float dx = wx - px;
+            float dz = wz - pz;
+            float d2 = dx * dx + dz * dz;
+
+            if (d2 < bestSq) {
+                bestSq = d2;
+                bestPoint = {px, TerrainHeightAtWorld(px, pz), pz};
+
+                float len = sqrtf(lenSq);
+                bestTangent = {abx / len, 0.0f, abz / len};
+            }
+        }
+    }
+
+    if (nearest) *nearest = bestPoint;
+    if (tangent) *tangent = bestTangent;
+    return sqrtf(bestSq);
+}
+
+bool City::CellOverlapsVisibleRoad(int x, int z, float extraMargin) const {
+    if (!Inside(x, z)) return false;
+    Vector3 p = GridToWorld(x, z);
+
+    // Zone tile half-width + sidewalk half-width. If the cell centre is closer
+    // than this, the visible square would overlap the actual curved road.
+    float exclusion = CELL_SIZE * 0.80f + extraMargin;
+    return DistanceToVisibleRoad(p.x, p.z) < exclusion;
+}
+
+bool City::ZoneCellEligible(int x, int z) const {
+    if (!Inside(x, z) || IsWater(x, z) || RoadAt(x, z)) return false;
+    if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) return false;
+
+    Vector3 p = GridToWorld(x, z);
+    float d = DistanceToVisibleRoad(p.x, p.z);
+
+    // Roughly two rows of zoning around a road for the current lot system.
+    return d >= CELL_SIZE * 0.80f && d <= CELL_SIZE * 2.65f;
+}
+
 bool City::RoadConnected(int x, int z, int nx, int nz) const {
     if (!RoadAt(x, z) || !RoadAt(nx, nz)) return false;
     int dir = RoadDirIndex(nx - x, nz - z);
@@ -266,6 +330,7 @@ bool City::LotClearForZone(int x, int z, int w, int d, Zone zone) const {
     for (int zz = z; zz < z + d; ++zz) {
         for (int xx = x; xx < x + w; ++xx) {
             if (zones_[zz][xx] != zone || CellBlocked(xx, zz)) return false;
+            if (CellOverlapsVisibleRoad(xx, zz, CELL_SIZE * 0.05f)) return false;
             float h = TerrainHeight(xx, zz);
             minH = std::min(minH, h);
             maxH = std::max(maxH, h);
@@ -281,6 +346,7 @@ bool City::LotClearForService(int x, int z, int w, int d) const {
     for (int zz = z; zz < z + d; ++zz) {
         for (int xx = x; xx < x + w; ++xx) {
             if (CellBlocked(xx, zz)) return false;
+            if (CellOverlapsVisibleRoad(xx, zz, CELL_SIZE * 0.08f)) return false;
             float h = TerrainHeight(xx, zz);
             minH = std::min(minH, h);
             maxH = std::max(maxH, h);
@@ -290,13 +356,19 @@ bool City::LotClearForService(int x, int z, int w, int d) const {
 }
 
 bool City::LotAdjacentToRoad(int x, int z, int w, int d) const {
-    for (int xx = x; xx < x + w; ++xx) {
-        if (RoadAt(xx, z - 1) || RoadAt(xx, z + d)) return true;
-    }
+    if (!Inside(x, z) || !Inside(x + w - 1, z + d - 1)) return false;
+
+    float minDistance = 1.0e30f;
     for (int zz = z; zz < z + d; ++zz) {
-        if (RoadAt(x - 1, zz) || RoadAt(x + w, zz)) return true;
+        for (int xx = x; xx < x + w; ++xx) {
+            Vector3 p = GridToWorld(xx, zz);
+            minDistance = std::min(minDistance, DistanceToVisibleRoad(p.x, p.z));
+        }
     }
-    return false;
+
+    // The lot must touch the road's zoning band, but may never overlap it.
+    return minDistance >= CELL_SIZE * 0.76f &&
+           minDistance <= CELL_SIZE * 1.55f;
 }
 
 int City::BestRoadOrientation(int x, int z, int w, int d) const {
@@ -771,10 +843,11 @@ void City::PlaceDraggedRoad() {
 void City::PaintZoneRect(int x0, int z0, int x1, int z1, Zone zone) {
     int xa = std::min(x0, x1), xb = std::max(x0, x1);
     int za = std::min(z0, z1), zb = std::max(z0, z1);
+
     for (int z = za; z <= zb; ++z) {
         for (int x = xa; x <= xb; ++x) {
-            if (!Inside(x, z) || RoadAt(x, z) || IsWater(x, z) || ServiceIndexAt(x, z) >= 0) continue;
-            if (BuildingIndexAt(x, z) < 0) zones_[z][x] = zone;
+            if (!ZoneCellEligible(x, z)) continue;
+            zones_[z][x] = zone;
         }
     }
 }
@@ -1041,6 +1114,23 @@ bool City::TrySpawnBuildingAt(int x, int z, Zone zone) {
         Building b;
         b.x = ax; b.z = az; b.w = w; b.d = d; b.zone = zone;
         b.orientation = BestRoadOrientation(ax, az, w, d);
+
+        Vector3 lotCenter = LotCenter(ax, az, w, d);
+        Vector3 nearestRoad{};
+        Vector3 roadTangent{};
+        DistanceToVisibleRoad(lotCenter.x, lotCenter.z, &nearestRoad, &roadTangent);
+        Vector3 front{
+            nearestRoad.x - lotCenter.x,
+            0.0f,
+            nearestRoad.z - lotCenter.z
+        };
+        float frontLen = sqrtf(front.x * front.x + front.z * front.z);
+        if (frontLen > 0.001f) {
+            front.x /= frontLen;
+            front.z /= frontLen;
+            b.rotationDegrees = atan2f(front.x, front.z) * RAD2DEG;
+        }
+
         b.variant = GetRandomValue(0, zone == Zone::Residential ? 11 : 9);
         b.palette = GetRandomValue(0, zone == Zone::Residential ? 11 : 9);
         b.roofStyle = GetRandomValue(0, 4);
@@ -1371,7 +1461,7 @@ void City::DrawNaturalProps(const Camera3D& camera) const {
     float detailSq = detailRadius * detailRadius;
 
     for (const auto& prop : naturalProps_) {
-        if (RoadAt(prop.x, prop.z) || zones_[prop.z][prop.x] != Zone::None) continue;
+        if (RoadAt(prop.x, prop.z) || CellOverlapsVisibleRoad(prop.x, prop.z) || zones_[prop.z][prop.x] != Zone::None) continue;
         if (ServiceIndexAt(prop.x, prop.z) >= 0) continue;
         Vector3 p = GridToWorld(prop.x, prop.z);
         float dx = p.x - camera.target.x;
@@ -1471,10 +1561,10 @@ void City::DrawRoads(const Camera3D& camera) const {
     float visibleRadius = cameraDistance * 1.95f + 40.0f;
     float visibleSq = visibleRadius * visibleRadius;
 
-    auto endpointIsJunction = [&](const RoadVisualPath& owner, bool atStart, Vector3& junction) {
+    auto endpointIsJunction = [&](const RoadVisualPath& owner, bool atStart) {
         if (owner.points.size() < 2) return false;
         Vector3 p = atStart ? owner.points.front() : owner.points.back();
-        float thresholdSq = (CELL_SIZE * 0.42f) * (CELL_SIZE * 0.42f);
+        float thresholdSq = (CELL_SIZE * 0.34f) * (CELL_SIZE * 0.34f);
 
         for (const auto& other : roadVisualPaths_) {
             if (&other == &owner || other.points.size() < 2) continue;
@@ -1491,20 +1581,12 @@ void City::DrawRoads(const Camera3D& camera) const {
                 float apx = p.x - a.x;
                 float apz = p.z - a.z;
                 float t = Clamp((apx * abx + apz * abz) / lenSq, 0.0f, 1.0f);
+                float qx = a.x + abx * t;
+                float qz = a.z + abz * t;
+                float dx = p.x - qx;
+                float dz = p.z - qz;
 
-                Vector3 q{
-                    a.x + abx * t,
-                    0.0f,
-                    a.z + abz * t
-                };
-                q.y = TerrainHeightAtWorld(q.x, q.z);
-
-                float dx = p.x - q.x;
-                float dz = p.z - q.z;
-                if (dx * dx + dz * dz <= thresholdSq) {
-                    junction = q;
-                    return true;
-                }
+                if (dx * dx + dz * dz <= thresholdSq) return true;
             }
         }
         return false;
@@ -1549,8 +1631,8 @@ void City::DrawRoads(const Camera3D& camera) const {
             if (i > 0 && i + 1 < points.size()) {
                 Vector3 nNext{-nextDir.z, 0.0f, nextDir.x};
                 float denom = fabsf(normal.x * nNext.x + normal.z * nNext.z);
-                denom = std::max(0.58f, denom);
-                width = std::min(halfWidth / denom, halfWidth * 1.30f);
+                denom = std::max(0.62f, denom);
+                width = std::min(halfWidth / denom, halfWidth * 1.24f);
             }
 
             p.y += lift;
@@ -1565,28 +1647,23 @@ void City::DrawRoads(const Camera3D& camera) const {
     };
 
     auto drawCenterDashes = [&](const RoadVisualPath& path) {
-        const auto& points = path.points;
-        if (points.size() < 2) return;
+        if (path.points.size() < 2) return;
 
-        Vector3 jStart{}, jEnd{};
-        bool startJunction = endpointIsJunction(path, true, jStart);
-        bool endJunction = endpointIsJunction(path, false, jEnd);
-        float keepClear = CELL_SIZE * 0.55f;
+        bool startJunction = endpointIsJunction(path, true);
+        bool endJunction = endpointIsJunction(path, false);
+        float clearLength = CELL_SIZE * 0.62f;
 
-        float totalLength = 0.0f;
-        for (size_t i = 0; i + 1 < points.size(); ++i) {
-            float dx = points[i + 1].x - points[i].x;
-            float dz = points[i + 1].z - points[i].z;
-            totalLength += sqrtf(dx * dx + dz * dz);
+        float total = 0.0f;
+        for (size_t i = 0; i + 1 < path.points.size(); ++i) {
+            float dx = path.points[i + 1].x - path.points[i].x;
+            float dz = path.points[i + 1].z - path.points[i].z;
+            total += sqrtf(dx * dx + dz * dz);
         }
 
         float travelled = 0.0f;
-        float dashPeriod = 1.45f;
-        float dashLength = 0.72f;
-
-        for (size_t i = 0; i + 1 < points.size(); ++i) {
-            Vector3 a = points[i];
-            Vector3 b = points[i + 1];
+        for (size_t i = 0; i + 1 < path.points.size(); ++i) {
+            Vector3 a = path.points[i];
+            Vector3 b = path.points[i + 1];
             Vector3 d = Vector3Subtract(b, a);
             d.y = 0.0f;
             float len = sqrtf(d.x * d.x + d.z * d.z);
@@ -1596,92 +1673,100 @@ void City::DrawRoads(const Camera3D& camera) const {
             float segEnd = travelled + len;
             travelled = segEnd;
 
-            if (startJunction && segEnd < keepClear) continue;
-            if (endJunction && segStart > totalLength - keepClear) continue;
+            if (startJunction && segStart < clearLength) continue;
+            if (endJunction && segEnd > total - clearLength) continue;
 
-            float phase = fmodf(segStart, dashPeriod);
-            bool on = phase < dashLength;
-            if (!on) continue;
+            float phase = fmodf(segStart, 1.50f);
+            if (phase > 0.72f) continue;
 
             d.x /= len; d.z /= len;
             Vector3 side{-d.z * 0.014f, 0.0f, d.x * 0.014f};
-
             a.y += 0.154f;
             b.y += 0.154f;
-            Vector3 aL{a.x + side.x, a.y, a.z + side.z};
-            Vector3 aR{a.x - side.x, a.y, a.z - side.z};
-            Vector3 bL{b.x + side.x, b.y, b.z + side.z};
-            Vector3 bR{b.x - side.x, b.y, b.z - side.z};
 
-            DrawTriangle3D(aL, bL, bR, Color{226, 220, 190, 185});
-            DrawTriangle3D(aL, bR, aR, Color{226, 220, 190, 185});
+            DrawTriangle3D(
+                {a.x + side.x, a.y, a.z + side.z},
+                {b.x + side.x, b.y, b.z + side.z},
+                {b.x - side.x, b.y, b.z - side.z},
+                Color{226, 220, 190, 185}
+            );
+            DrawTriangle3D(
+                {a.x + side.x, a.y, a.z + side.z},
+                {b.x - side.x, b.y, b.z - side.z},
+                {a.x - side.x, a.y, a.z - side.z},
+                Color{226, 220, 190, 185}
+            );
         }
     };
 
     Color sidewalk{171, 173, 169, 255};
     Color asphalt{47, 52, 56, 255};
 
+    // Pass 1: every sidewalk. At crossings they merge with each other.
     for (const auto& path : roadVisualPaths_) {
         if (path.points.size() < 2) continue;
-
         Vector3 center = path.points[path.points.size() / 2];
         float dx = center.x - camera.target.x;
         float dz = center.z - camera.target.z;
         if (dx * dx + dz * dz > visibleSq) continue;
 
         buildRibbon(path.points, CELL_SIZE * 0.385f, 0.050f, sidewalk);
-        buildRibbon(path.points, CELL_SIZE * 0.300f, 0.103f, asphalt);
-        drawCenterDashes(path);
     }
 
-    // Fill only actual path-to-path junctions. These are not curve nodes, so
-    // the old "circle chain" cannot return.
-    std::vector<Vector3> drawnJunctions;
+    // Pass 2: every asphalt strip. Asphalt therefore always covers overlapping
+    // sidewalks at a junction, producing one continuous road surface.
     for (const auto& path : roadVisualPaths_) {
-        for (int which = 0; which < 2; ++which) {
-            Vector3 junction{};
-            if (!endpointIsJunction(path, which == 0, junction)) continue;
+        if (path.points.size() < 2) continue;
+        Vector3 center = path.points[path.points.size() / 2];
+        float dx = center.x - camera.target.x;
+        float dz = center.z - camera.target.z;
+        if (dx * dx + dz * dz > visibleSq) continue;
 
-            bool duplicate = false;
-            for (const auto& p : drawnJunctions) {
-                float dx = p.x - junction.x;
-                float dz = p.z - junction.z;
-                if (dx * dx + dz * dz < 0.12f) {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate) continue;
-            drawnJunctions.push_back(junction);
+        buildRibbon(path.points, CELL_SIZE * 0.300f, 0.103f, asphalt);
+    }
 
-            junction.y = TerrainHeightAtWorld(junction.x, junction.z);
-            DrawCylinder(
-                {junction.x, junction.y + 0.052f, junction.z},
-                CELL_SIZE * 0.405f, CELL_SIZE * 0.405f, 0.070f, 28, sidewalk
-            );
-            DrawCylinder(
-                {junction.x, junction.y + 0.105f, junction.z},
-                CELL_SIZE * 0.315f, CELL_SIZE * 0.315f, 0.084f, 28, asphalt
-            );
-        }
+    // Pass 3: markings. No circles or special blobs are used at junctions.
+    for (const auto& path : roadVisualPaths_) {
+        if (path.points.size() < 2) continue;
+        drawCenterDashes(path);
     }
 }
 
 void City::DrawZones(const Camera3D& camera) const {
     if (tool_ != Tool::Residential && tool_ != Tool::Commercial && tool_ != Tool::Industrial) return;
+
     float cameraDistance = Vector3Distance(camera.position, camera.target);
     float visibleRadius = cameraDistance * 1.70f + 28.0f;
     float visibleSq = visibleRadius * visibleRadius;
 
     for (int z = 0; z < GRID_H; ++z) {
         for (int x = 0; x < GRID_W; ++x) {
-            if (zones_[z][x] == Zone::None || RoadAt(x, z) || IsWater(x, z)) continue;
+            if (zones_[z][x] == Zone::None || IsWater(x, z)) continue;
+            if (!ZoneCellEligible(x, z) && BuildingIndexAt(x, z) < 0) continue;
+            if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) continue;
+
             Vector3 p = GridToWorld(x, z);
             float dx = p.x - camera.target.x;
             float dz = p.z - camera.target.z;
             if (dx * dx + dz * dz > visibleSq) continue;
-            if (BuildingIndexAt(x, z) >= 0 || ServiceIndexAt(x, z) >= 0) continue;
-            DrawCube({p.x, p.y + 0.012f, p.z}, CELL_SIZE * 0.82f, 0.025f, CELL_SIZE * 0.82f, ZoneColor(zones_[z][x], 70));
+
+            Vector3 nearest{}, tangent{};
+            DistanceToVisibleRoad(p.x, p.z, &nearest, &tangent);
+            Vector3 toRoad{nearest.x - p.x, 0.0f, nearest.z - p.z};
+            float angle = atan2f(toRoad.x, toRoad.z) * RAD2DEG;
+
+            rlPushMatrix();
+            rlTranslatef(p.x, 0.0f, p.z);
+            rlRotatef(angle, 0.0f, 1.0f, 0.0f);
+            rlTranslatef(-p.x, 0.0f, -p.z);
+            DrawCube(
+                {p.x, p.y + 0.012f, p.z},
+                CELL_SIZE * 0.76f,
+                0.025f,
+                CELL_SIZE * 0.76f,
+                ZoneColor(zones_[z][x], 70)
+            );
+            rlPopMatrix();
         }
     }
 }
@@ -1699,7 +1784,21 @@ void City::DrawBuildings(const Camera3D& camera) const {
         float dz = center.z - camera.target.z;
         float d2 = dx * dx + dz * dz;
         if (d2 > visibleSq) continue;
-        BuildingRenderer::DrawBuilding(b, center, b.w * CELL_SIZE, b.d * CELL_SIZE, d2 <= detailSq);
+
+        rlPushMatrix();
+        rlTranslatef(center.x, 0.0f, center.z);
+        rlRotatef(b.rotationDegrees, 0.0f, 1.0f, 0.0f);
+        rlTranslatef(-center.x, 0.0f, -center.z);
+
+        BuildingRenderer::DrawBuilding(
+            b,
+            center,
+            b.w * CELL_SIZE,
+            b.d * CELL_SIZE,
+            d2 <= detailSq
+        );
+
+        rlPopMatrix();
     }
 }
 
@@ -1879,7 +1978,7 @@ void City::DrawTopBar() const {
     DrawRectangle(0, 0, w, 42, Color{17, 27, 32, 240});
 
     DrawText("CITY LAB", 18, 10, 20, Color{239, 244, 245, 255});
-    DrawText("v0.14", 116, 14, 12, Color{103, 184, 205, 255});
+    DrawText("v0.15", 116, 14, 12, Color{103, 184, 205, 255});
 
     std::string level = "STADTSTUFE " + std::to_string(cityLevel_);
     DrawText(level.c_str(), 178, 14, 12, Color{179, 201, 207, 255});

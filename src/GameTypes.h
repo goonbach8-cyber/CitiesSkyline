@@ -31,7 +31,8 @@ struct Building {
     int z = 0;
     int w = 1;
     int d = 1;
-    int orientation = 0; // 0 north, 1 east, 2 south, 3 west
+    int orientation = 0; // legacy cardinal orientation
+    float rotationDegrees = 0.0f; // visual orientation towards the curved road
 
     Zone zone = Zone::None;
     int level = 1;
