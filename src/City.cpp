@@ -1111,8 +1111,6 @@ void City::UpdateTraffic(float dt) {
 }
 
 void City::Simulate(float dt) {
-
-void City::Simulate(float dt) {
     if (gameSpeed_ <= 0) return;
     float multiplier = gameSpeed_ == 1 ? 1.0f : (gameSpeed_ == 2 ? 2.35f : 4.8f);
     dayAccumulator_ += dt * multiplier;
